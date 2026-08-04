@@ -60,6 +60,10 @@ def main() -> None:
         lr=float(optimization["adam_learning_rate"]),
     )
     spsa = SPSA(perturbation=float(optimization["spsa_perturbation"]), learning_rate=float(optimization["spsa_learning_rate"]), seed=int(experiment["seed"]))
+    early_stop_loss = optimization.get("early_stop_loss")
+    if early_stop_loss is not None and float(early_stop_loss) < 0:
+        raise ValueError("optimization.early_stop_loss 必须为非负数或 null")
+    stopped_early = False
     iterator = iter(train_loader)
 
     for step in range(1, int(optimization["steps"]) + 1):
@@ -72,6 +76,11 @@ def main() -> None:
         terms["loss"].backward()
         optimizer.step()
         optimizer.zero_grad()
+
+        if early_stop_loss is not None and terms["loss"].detach().float().item() <= float(early_stop_loss):
+            stopped_early = True
+            print(f"stage2 提前停止：step={step} loss={terms['loss'].detach().float().item():.6f} <= {float(early_stop_loss):.6f}")
+            break
 
         if step % int(logging["log_every"]) == 0:
             print(f"stage2 step={step} loss={terms['loss'].detach().float().item():.4f} ce={terms['ce'].detach().float().item():.4f} kd={terms['kd'].detach().float().item():.4f}")
@@ -98,7 +107,7 @@ def main() -> None:
 
     save_compressed_checkpoint(output, replacements, rank, z_dim, kappa, target_layers, teacher_name, str(photonic["provider"]))
     tokenizer.save_pretrained(output)
-    write_run_config(output, config, "stage2", device, {"status": "completed", "teacher": teacher_name})
+    write_run_config(output, config, "stage2", device, {"status": "early_stopped" if stopped_early else "completed", "teacher": teacher_name, "early_stop_loss": early_stop_loss})
     print(f"已保存阶段二条件化模块至 {output}")
 
 

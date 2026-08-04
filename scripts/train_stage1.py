@@ -58,6 +58,10 @@ def main() -> None:
     student.to(device).train()
     optimizer = torch.optim.Adam(replacement.adam_parameters(), lr=float(optimization["adam_learning_rate"]))
     spsa = SPSA(perturbation=float(optimization["spsa_perturbation"]), learning_rate=float(optimization["spsa_learning_rate"]), seed=int(experiment["seed"]))
+    early_stop_loss = optimization.get("early_stop_loss")
+    if early_stop_loss is not None and float(early_stop_loss) < 0:
+        raise ValueError("optimization.early_stop_loss 必须为非负数或 null")
+    stopped_early = False
     captured: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     best_validation_loss = float("inf")
 
@@ -105,6 +109,11 @@ def main() -> None:
             optimizer.step()
             optimizer.zero_grad()
 
+            if early_stop_loss is not None and details["loss"].detach().float().item() <= float(early_stop_loss):
+                stopped_early = True
+                print(f"stage1 提前停止：step={step} y_loss={details['loss'].detach().float().item():.6f} <= {float(early_stop_loss):.6f}")
+                break
+
             if step % int(logging["visualize_every"]) == 0:
                 x, teacher_output = captured["values"]
                 with torch.no_grad():
@@ -147,7 +156,7 @@ def main() -> None:
 
     save_compressed_checkpoint(output, replacements, rank, z_dim, kappa, target_layers, teacher_name, str(photonic["provider"]))
     tokenizer.save_pretrained(output)
-    write_run_config(output, config, "stage1", device, {"status": "completed", "teacher": teacher_name, "best_validation_y_loss": best_validation_loss,})
+    write_run_config(output, config, "stage1", device, {"status": "early_stopped" if stopped_early else "completed", "teacher": teacher_name, "best_validation_y_loss": best_validation_loss, "early_stop_loss": early_stop_loss,})
     print(f"已保存 layer {target} 的阶段一模块至 {output}")
 
 

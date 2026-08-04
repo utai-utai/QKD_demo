@@ -57,7 +57,7 @@ QKD_demo/
         ├── stage1_loss.py            # 阶段一 Output 重建损失与 Gate/Up/Down 诊断面板
         ├── stage2_loss.py            # 阶段二 0.5 CE + 0.5 τ² Top-K KD 联合损失
         ├── spsa.py                   # 物理参数 θ 的无梯度 SPSA 随机采样优化器
-        └── runtime.py                # 运行期 YAML 快照、硬件分发与无限 DataLoader
+        └── tools.py                  # 运行期 YAML、命令行覆盖、硬件分发与无限 DataLoader
 
 ```
 
@@ -140,6 +140,7 @@ python scripts/train_stage2.py --config configs/stage2.yaml
 | **光子提供器** | `photonic.provider` | `deepquantum` | 选择 `deepquantum` 高斯模拟器或 `mock` CPU 快速测试器 |
 | **量子测量** | `photonic.shots` | `None` / `1024` | 测量 Shot 数（`None` 为理论解析期望，整数则注入量子采样噪声） |
 | **双轨优化器** | `optimization.spsa_*` | `perturbation=0.01` | **SPSA 随机扰动优化器**试探步长与学习率（专门更新冻结梯度的 $\theta$） |
+| **早停** | `optimization.early_stop_loss` | `null` / `0.1` | 当前训练总 loss 小于等于阈值时结束训练并保存；`null` 表示关闭 |
 
 ---
 

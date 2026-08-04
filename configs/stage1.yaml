@@ -23,6 +23,7 @@ photonic:
 
 optimization:
   steps: 100
+  early_stop_loss: null  # 设为数值时，当前训练 loss <= 此值即提前结束；null 表示关闭
   adam_learning_rate: 2.0e-4
   spsa_every: 200
   spsa_perturbation: 0.05
