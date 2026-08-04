@@ -1,0 +1,29 @@
+[project]
+name = "QKD"
+version = "0.1.0"
+description = "Reproducible classical and quantum-assisted knowledge distillation for small language models."
+requires-python = ">=3.10"
+dependencies = [
+  "deepquantum>=4.5",
+  "pyyaml>=6.0",
+  "torch>=2.5",
+  "transformers>=4.45",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "ruff>=0.9"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

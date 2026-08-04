@@ -1,0 +1,12 @@
+.venv/
+.idea/
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+data/raw/
+data/processed/
+outputs/
+wandb/
+checkpoints/
+.ruff_cache/

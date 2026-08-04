@@ -1,0 +1,33 @@
+experiment:
+  output_dir: outputs/stage1-layer21-r64
+  seed: 42
+
+data:
+  train_data: data/processed/demo/train.jsonl
+  validation_data: data/processed/demo/validation.jsonl
+  batch_size: 1
+
+model:
+  teacher: Qwen/Qwen3.5-0.8B-Base
+  target_layers: [21]
+
+compression:
+  rank: 64
+  z_dim: 16
+  kappa: 1.0
+
+photonic:
+  provider: mock
+  shots: null
+  ema_decay: 0.9
+
+optimization:
+  steps: 100
+  adam_learning_rate: 2.0e-4
+  spsa_every: 200
+  spsa_perturbation: 0.05
+  spsa_learning_rate: 0.01
+
+logging:
+  visualize_every: 20
+  validate_every: 200
