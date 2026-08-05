@@ -38,7 +38,7 @@ class MockPhotonicFeatureProvider(PhotonicFeatureProvider):
             noise = torch.sin(features.detach() * 12.9898 + phase.detach() * 78.233)
             features = features + noise / float(shots) ** 0.5
         if self.ema_decay is not None:
-            batch_mean = features.detach().mean(dim=tuple(range(features.ndim - 1)))
+            batch_mean = features.detach().float().mean(dim=tuple(range(features.ndim - 1)))
             # 验证与 SPSA 目标评估必须是无副作用的；只有训练模式更新 EMA。
             if self.training:
                 if not self.ema_initialized:

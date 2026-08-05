@@ -62,6 +62,7 @@ class ConditionedLowRankLinear(nn.Module):
         t = F.linear(states, self.B)
         encoded = self.kappa * torch.tanh(F.linear(t, self.R))
         z = provider.sample(encoded, theta, shots, states.device)
+        z = z.to(device=t.device, dtype=self.C.dtype)
         gate = 1 + 0.1 * torch.tanh(F.linear(z, self.C, self.b))
         return F.linear(gate * t, self.P)
 
