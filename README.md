@@ -36,6 +36,7 @@ QKD_demo/
 │
 ├── 📜 scripts/                        # 辅助与训练入口脚本
 │   ├── prepare_data.py               # JSONL 对话数据 Token 化与数据集切分
+│   ├── plot_training_log.py           # 单/多训练日志指标曲线可视化
 │   ├── train_stage1.py               # 阶段一训练入口
 │   └── train_stage2.py               # 阶段二训练入口
 │
@@ -50,10 +51,11 @@ QKD_demo/
     │   └── checkpoint.py             # 增量模块保存、恢复与 Stage 1 多层 Checkpoint 缝合
     │
     └── 🏋️ training/                  # 损失函数与双轨优化器
-        ├── stage1_loss.py            # 阶段一 Output 重建损失与 Gate/Up/Down 诊断面板
-        ├── stage2_loss.py            # 阶段二 0.5 CE + 0.5 τ² Top-K KD 联合损失
+        ├── artifacts.py              # run.json、CSV、checkpoint 与 best probe 产物管理
+        ├── stage1_loss.py            # 阶段一纯张量重建损失与 Gate/Up/Down 诊断指标
+        ├── stage2_loss.py            # 阶段二纯张量 0.5 CE + 0.5 τ² Top-K KD 联合损失
         ├── spsa.py                   # 物理参数 θ 的无梯度 SPSA 随机采样优化器
-        └── tools.py                  # 运行期 YAML、命令行覆盖、硬件分发与无限 DataLoader
+        └── tools.py                  # 配置/数据工具、Stage 1 Hook/验证与 Stage 2 SPSA 验证目标
 
 ```
 
@@ -157,3 +159,17 @@ outputs/runs/stage1/layer-21-r64-20260805-223826/
 默认输出目录中的 `{timestamp}` 会在运行开始时展开为本地时间的 `YYYYMMDD-HHMMSS`，因此每次实验都有带日期时间的独立目录。阶段二配置中的 `{latest}` 会分别选择各目标层目录下时间最新的一次阶段一结果；如需指定特定实验，可将其替换为完整目录名。
 
 `best_probe.pt` 使用 PyTorch 格式保存固定验证 batch 的 `input_ids`、`attention_mask`、`labels`，以及每个目标层的 `teacher_y` 和 `student_y`（以 float16 保存）。文件仅在最佳 checkpoint 刷新时覆盖更新，不会在每个训练 step 重复保存。
+
+### 📈 训练日志可视化
+
+使用 `scripts/plot_training_log.py` 将一个或多个 `training_log.csv` 的指定列绘制为曲线；横轴固定为 `step`，每个“文件 + 指标”组合使用不同颜色。以下命令对比两个 Stage 1 运行中的 `train_loss` 与 `y_nmse`：
+
+```bash
+python scripts/plot_training_log.py \
+  --input outputs/runs/stage1/layer-21-r64-<timestamp>/training_log.csv \
+          outputs/runs/stage1/layer-22-r64-<timestamp>/training_log.csv \
+  --metrics train_loss y_nmse \
+  --output outputs/stage1-comparison.png
+```
+
+如需任意搭配不同文件的不同指标，重复传入 `--series 文件路径 指标名`；未指定 `--output` 时，图片默认写入第一个日志所在目录的 `training_plot.png`。
