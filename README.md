@@ -162,14 +162,22 @@ outputs/runs/stage1/layer-21-r64-20260805-223826/
 
 ### 📈 训练日志可视化
 
-使用 `scripts/plot_training_log.py` 将一个或多个 `training_log.csv` 的指定列绘制为曲线；横轴固定为 `step`，每个“文件 + 指标”组合使用不同颜色。以下命令对比两个 Stage 1 运行中的 `train_loss` 与 `y_nmse`：
+使用 `scripts/plot_training_log.py` 只从 `outputs/runs` 选择同一 Stage 的运行并绘制指定列，横轴固定为 `step`。运行名省略 rank 与日期时会自动选择最新一次；例如 `layer-21` 会匹配最新的 Layer 21 Stage 1 运行。
+
+比较多个 Stage 1 单层运行：
 
 ```bash
 python scripts/plot_training_log.py \
-  --input outputs/runs/stage1/layer-21-r64-<timestamp>/training_log.csv \
-          outputs/runs/stage1/layer-22-r64-<timestamp>/training_log.csv \
-  --metrics train_loss y_nmse \
-  --output outputs/stage1-comparison.png
+  --runs layer-21 layer-22 \
+  --metrics train_loss y_nmse
 ```
 
-如需任意搭配不同文件的不同指标，重复传入 `--series 文件路径 指标名`；未指定 `--output` 时，图片默认写入第一个日志所在目录的 `training_plot.png`。
+绘制最新的多层 Stage 2 运行：
+
+```bash
+python scripts/plot_training_log.py \
+  --runs layers-21-22-23 \
+  --metrics loss ce kd
+```
+
+同一运行内比较时，图例显示指标名；跨运行比较时，同一运行使用相同颜色、不同指标使用不同线型，图例只显示运行名。图片会自动保存到 `outputs/analysis/stage1/` 或 `outputs/analysis/stage2/`，文件名统一为 `layer-21-22-23_train_loss-y_nmse.png` 这类“层索引_指标”格式；Stage 1 与 Stage 2 不能混合比较。
