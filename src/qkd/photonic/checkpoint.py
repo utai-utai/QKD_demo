@@ -10,12 +10,9 @@ import torch
 from .model import PhotonicLowRankMLP
 
 
-def save_compressed_checkpoint( output_dir: str | Path, replacements: list[PhotonicLowRankMLP], rank: int, z_dim: int, kappa: float, target_layers: tuple[int, ...], teacher_name: str, provider_name: str) -> None:
-    """仅保存替换 MLP，避免复制冻结的基础模型权重。"""
-    output = Path(output_dir)
-    output.mkdir(parents=True, exist_ok=True)
-    metadata = {
-        "format": "qkd-photonic-low-rank-v1",
+def checkpoint_metadata(rank: int, z_dim: int, kappa: float, target_layers: tuple[int, ...], teacher_name: str, provider_name: str) -> dict[str, object]:
+    """构造与光子模块权重匹配的结构元数据。"""
+    return {
         "teacher": teacher_name,
         "provider": provider_name,
         "spec": {
@@ -25,16 +22,28 @@ def save_compressed_checkpoint( output_dir: str | Path, replacements: list[Photo
             "target_layers": list(target_layers),
         },
     }
-    (output / "photonic_config.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def save_compressed_modules(output_dir: str | Path, replacements: list[PhotonicLowRankMLP], target_layers: tuple[int, ...]) -> None:
+    """仅保存替换 MLP 权重，不负责运行目录或元数据。"""
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
     torch.save({str(index): module.state_dict() for index, module in zip(target_layers, replacements)}, output / "photonic_modules.pt",)
 
 
 def read_compressed_checkpoint_config(checkpoint_dir: str | Path) -> dict[str, object]:
-    """读取 checkpoint 的结构配置。"""
+    """从当前 ``run.json`` 格式读取 checkpoint 的结构配置。"""
     checkpoint = Path(checkpoint_dir)
-    metadata = json.loads((checkpoint / "photonic_config.json").read_text(encoding="utf-8"))
-    if metadata.get("format") != "qkd-photonic-low-rank-v1":
-        raise ValueError(f"不支持的光子 checkpoint 格式：{metadata.get('format')}")
+    run_path = checkpoint / "run.json"
+    if not run_path.exists():
+        raise FileNotFoundError(f"{run_path} 不存在；请使用当前格式重新运行训练")
+    run_data = json.loads(run_path.read_text(encoding="utf-8"))
+    metadata = run_data.get("checkpoint")
+    if not isinstance(metadata, dict):
+        raise ValueError(f"{run_path} 缺少 checkpoint 映射")
+    checkpoint_format = run_data.get("format")
+    if checkpoint_format != "qkd-photonic-low-rank-v1":
+        raise ValueError(f"不支持的光子 checkpoint 格式：{checkpoint_format}")
     return metadata
 
 

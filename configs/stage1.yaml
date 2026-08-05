@@ -1,5 +1,5 @@
 experiment:
-  output_dir: outputs/stage1-layer21-r64
+  output_dir: outputs/runs/stage1/layer-21-r64-{timestamp}
   seed: 42
 
 data:

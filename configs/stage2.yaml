@@ -1,5 +1,5 @@
 experiment:
-  output_dir: outputs/stage2-layers21-22-23-r64
+  output_dir: outputs/runs/stage2/layers-21-22-23-r64-{timestamp}
   seed: 42
 
 data:
@@ -23,9 +23,9 @@ photonic:
 
 initialization:
   stage1_checkpoints:
-    - outputs/stage1-layer21-r64
-    - outputs/stage1-layer22-r64
-    - outputs/stage1-layer23-r64
+    - outputs/runs/stage1/layer-21-r64-{latest}
+    - outputs/runs/stage1/layer-22-r64-{latest}
+    - outputs/runs/stage1/layer-23-r64-{latest}
 
 optimization:
   steps: 100

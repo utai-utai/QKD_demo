@@ -2,16 +2,23 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack
-from pathlib import Path
 
 import torch
 
 from qkd.modeling import load_causal_lm, load_tokenizer
-from qkd.photonic.checkpoint import save_compressed_checkpoint
 from qkd.photonic.model import find_decoder_layers, make_compressed_student
-from qkd.training.tools import apply_overrides, load_config, make_loader, next_batch, provider_factory, section, training_device, write_run_config
+from qkd.training.artifacts import STAGE1_LOG_FIELDS, TrainingArtifacts
 from qkd.training.spsa import SPSA
 from qkd.training.stage1_loss import local_diagnostics, stage_one_loss
+from qkd.training.tools import (
+    apply_overrides,
+    load_config,
+    make_loader,
+    next_batch,
+    provider_factory,
+    section,
+    training_device,
+)
 
 
 def arguments() -> argparse.Namespace:
@@ -33,14 +40,15 @@ def main() -> None:
 
     torch.manual_seed(int(experiment["seed"]))
     device = training_device()
-    output = Path(experiment["output_dir"])
     teacher_name = str(model["teacher"])
     print(f"运行设备：{device}")
-    write_run_config(output, config, "stage1", device, {"status": "running", "teacher": teacher_name})
+    artifacts = TrainingArtifacts.create(config, "stage1", device, STAGE1_LOG_FIELDS, teacher_name)
+    output = artifacts.output
 
     tokenizer = load_tokenizer(teacher_name)
     train_loader = make_loader(str(data["train_data"]), tokenizer, int(data["batch_size"]), True)
     validation_loader = make_loader(str(data["validation_data"]), tokenizer, int(data["batch_size"]), False)
+    probe_batch = {key: value.to(device) for key, value in next(iter(validation_loader)).items()}
     teacher = load_causal_lm(teacher_name, trainable=False).to(device).eval()
     teacher_layers = find_decoder_layers(teacher)
     target = target_layers[0]
@@ -64,7 +72,8 @@ def main() -> None:
     stopped_early = False
     captured: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     best_validation_loss = float("inf")
-
+    best_step: int | None = None
+    final_loss: float | None = None
     with ExitStack() as stack:
         old_mlp = teacher_layers[target].mlp
 
@@ -100,6 +109,31 @@ def main() -> None:
             student.train()
             return weighted_loss / token_count, {name: value / token_count for name, value in totals.items()}
 
+        @torch.no_grad()
+        def save_best_probe(step: int, metric_name: str, metric_value: float | None) -> None:
+            student.eval()
+            try:
+                details = details_for(probe_batch)
+                _, teacher_y = captured["values"]
+                artifacts.save_best_probe({
+                    "format": "qkd-best-probe-v1",
+                    "stage": "stage1",
+                    "step": step,
+                    "selection": {"metric": metric_name, "value": metric_value},
+                    "target_layers": list(target_layers),
+                    "input_ids": probe_batch["input_ids"].detach().cpu(),
+                    "attention_mask": probe_batch["attention_mask"].detach().cpu(),
+                    "labels": probe_batch["labels"].detach().cpu(),
+                    "layers": {
+                        str(target): {
+                            "teacher_y": teacher_y.detach().to("cpu", torch.float16),
+                            "student_y": details["output"].detach().to("cpu", torch.float16),
+                        },
+                    },
+                })
+            finally:
+                student.train()
+
         iterator = iter(train_loader)
         for step in range(1, int(optimization["steps"]) + 1):
             batch, iterator = next_batch(iterator, train_loader)
@@ -108,55 +142,69 @@ def main() -> None:
             details["loss"].backward()
             optimizer.step()
             optimizer.zero_grad()
+            final_loss = details["loss"].detach().float().item()
+            x, teacher_output = captured["values"]
+            with torch.no_grad():
+                gate, up = old_mlp.gate_proj(x), old_mlp.up_proj(x)
+            diagnostics = local_diagnostics(details, gate, up, teacher_output, batch["attention_mask"])
+            row = {
+                "step": step, "elapsed_seconds": artifacts.elapsed_seconds, "train_loss": final_loss,
+                "gate_loss": details["gate_loss"].detach().float().item(), "up_loss": details["up_loss"].detach().float().item(),
+                "down_loss": details["down_loss"].detach().float().item(), "output_loss": details["output_loss"].detach().float().item(),
+                **{name: value for name, value in diagnostics.items() if name != "valid_tokens"},
+                "validation_loss": "", "validation_y_nmse": "", "is_best": False, "spsa_applied": False, "early_stopped": False,
+            }
 
-            if early_stop_loss is not None and details["loss"].detach().float().item() <= float(early_stop_loss):
+            if early_stop_loss is not None and final_loss <= float(early_stop_loss):
                 stopped_early = True
-                print(f"stage1 提前停止：step={step} y_loss={details['loss'].detach().float().item():.6f} <= {float(early_stop_loss):.6f}")
+                row["early_stopped"] = True
+                artifacts.log_step(row)
+                print(f"stage1 提前停止：step={step} y_loss={final_loss:.6f} <= {float(early_stop_loss):.6f}")
                 break
 
             if step % int(logging["visualize_every"]) == 0:
-                x, teacher_output = captured["values"]
-                with torch.no_grad():
-                    gate, up = old_mlp.gate_proj(x), old_mlp.up_proj(x)
-                metrics = local_diagnostics(details, gate, up, teacher_output, batch["attention_mask"])
                 print(
-                    f"stage1 layer={target} step={step} y_loss={details['loss'].detach().float().item():.4f} "
-                    f"gate[nmse={metrics['gate_nmse']:.4f},cos={metrics['gate_cos']:.4f}] "
-                    f"up[nmse={metrics['up_nmse']:.4f},cos={metrics['up_cos']:.4f}] "
-                    f"down[nmse={metrics['down_nmse']:.4f},cos={metrics['down_cos']:.4f}] "
-                    f"y[nmse={metrics['y_nmse']:.4f},cos={metrics['y_cos']:.4f},mae={metrics['y_mae']:.4f}]"
+                    f"stage1 layer={target} step={step} y_loss={final_loss:.4f} "
+                    f"gate[nmse={diagnostics['gate_nmse']:.4f},cos={diagnostics['gate_cos']:.4f}] "
+                    f"up[nmse={diagnostics['up_nmse']:.4f},cos={diagnostics['up_cos']:.4f}] "
+                    f"down[nmse={diagnostics['down_nmse']:.4f},cos={diagnostics['down_cos']:.4f}] "
+                    f"y[nmse={diagnostics['y_nmse']:.4f},cos={diagnostics['y_cos']:.4f},mae={diagnostics['y_mae']:.4f}]"
                 )
 
             if step % int(optimization["spsa_every"]) == 0:
                 validation = next(iter(validation_loader))
                 validation = {key: value.to(device) for key, value in validation.items()}
 
-                def objective() -> torch.Tensor:
+                def objective(validation_batch: dict[str, torch.Tensor] = validation) -> torch.Tensor:
                     student.eval()
                     try:
-                        return details_for(validation)["loss"]
+                        return details_for(validation_batch)["loss"]
                     finally:
                         student.train()
 
                 for theta in (replacement.theta_gate, replacement.theta_up, replacement.theta_down):
                     spsa.step(theta, objective)
+                row["spsa_applied"] = True
 
             if int(logging["validate_every"]) and step % int(logging["validate_every"]) == 0:
                 validation_loss, metrics = validate()
+                row["validation_loss"] = validation_loss
+                row["validation_y_nmse"] = metrics["y_nmse"]
                 print(f"stage1 validation layer={target} step={step} y_loss={validation_loss:.4f} y_nmse={metrics['y_nmse']:.4f}")
                 if validation_loss < best_validation_loss:
                     best_validation_loss = validation_loss
-                    best_output = output / "best"
-                    save_compressed_checkpoint(best_output, replacements, rank, z_dim, kappa, target_layers, teacher_name, str(photonic["provider"]))
-                    tokenizer.save_pretrained(best_output)
-                    write_run_config(best_output, config, "stage1", device, {
-                        "status": "best_validation_checkpoint", "teacher": teacher_name,
-                        "step": step, "validation_y_loss": validation_loss,
-                    })
+                    best_step = step
+                    row["is_best"] = True
+                    artifacts.save_checkpoint(replacements, rank, z_dim, kappa, target_layers, teacher_name, str(photonic["provider"]))
+                    save_best_probe(step, "validation_loss", validation_loss)
+            artifacts.log_step(row)
 
-    save_compressed_checkpoint(output, replacements, rank, z_dim, kappa, target_layers, teacher_name, str(photonic["provider"]))
-    tokenizer.save_pretrained(output)
-    write_run_config(output, config, "stage1", device, {"status": "early_stopped" if stopped_early else "completed", "teacher": teacher_name, "best_validation_y_loss": best_validation_loss, "early_stop_loss": early_stop_loss,})
+        if best_step is None:
+            artifacts.save_checkpoint(replacements, rank, z_dim, kappa, target_layers, teacher_name, str(photonic["provider"]))
+            best_step = step
+            best_validation_loss = None
+            save_best_probe(step, "final_train_loss", final_loss)
+    artifacts.finish(status="early_stopped" if stopped_early else "completed", final_step=step, final_train_loss=final_loss, best_step=best_step, best_validation_loss=best_validation_loss, early_stop_loss=early_stop_loss)
     print(f"已保存 layer {target} 的阶段一模块至 {output}")
 
 

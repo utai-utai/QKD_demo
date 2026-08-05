@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
-from datetime import datetime, timezone
+import sys
 from functools import partial
 from pathlib import Path
-import sys
 from typing import Any
 
 import torch
@@ -84,20 +82,3 @@ def provider_factory(name: str, z_dim: int, ema_decay: float | None):
     if name == "deepquantum":
         return lambda: DeepQuantumCVFeatureProvider(z_dim=z_dim, ema_decay=ema_decay)
     raise ValueError(f"不支持的光子 provider：{name}")
-
-
-def write_run_config(output_dir: str | Path, config: dict[str, Any], stage: str, device: torch.device, extra: dict[str, Any] | None = None) -> Path:
-    """保存可复现实验的完整配置快照与运行元数据。"""
-    snapshot = deepcopy(config)
-    snapshot["run_metadata"] = {
-        "stage": stage,
-        "device": str(device),
-        "started_at_utc": datetime.now(timezone.utc).isoformat(),
-        "checkpoint_format": "qkd-photonic-low-rank-v1",
-        **(extra or {}),
-    }
-    output = Path(output_dir)
-    output.mkdir(parents=True, exist_ok=True)
-    path = output / "run_config.yaml"
-    path.write_text(yaml.safe_dump(snapshot, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    return path

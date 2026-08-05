@@ -63,12 +63,12 @@ QKD_demo/
 
 所有实验参数均以 `configs/` 中的 YAML 文件为唯一事实来源（Single Source of Truth）。训练过程分为两个阶段：
 
-除直接修改 YAML 外，也可用可重复的 `--set '段.键=YAML值'` 临时覆盖参数；实际生效的配置会保存到输出目录的 `run_config.yaml`。例如：
+除直接修改 YAML 外，也可用可重复的 `--set '段.键=YAML值'` 临时覆盖参数；实际生效的配置、checkpoint 结构信息与训练结果摘要会合并保存到输出目录的 `run.json`；逐 step 指标会保存为 `training_log.csv`。例如：
 
 ```bash
 python scripts/train_stage1.py --config configs/stage1.yaml \
   --set 'model.target_layers=[22]' \
-  --set 'experiment.output_dir=outputs/stage1-layer22-r64'
+  --set 'experiment.output_dir=outputs/runs/stage1/layer-22-r64-{timestamp}'
 ```
 
 ```
@@ -87,8 +87,9 @@ python scripts/train_stage1.py --config configs/stage1.yaml \
 处理原始 JSONL 消息数据并切分训练集/验证集：
 
 ```bash
-python scripts/prepare_data.py
-
+python scripts/prepare_data.py \
+    --input data/raw/conversations.jsonl \
+    --output-dir data/processed/demo
 ```
 
 ### 2️⃣ 运行阶段一 (Stage 1：单层局部重建)
@@ -110,8 +111,8 @@ python scripts/train_stage1.py --config configs/stage1.yaml
 ```yaml
 initialization:
   stage1_checkpoints:
-    - outputs/stage1-layer21-r64
-    - outputs/stage1-layer22-r64
+    - outputs/runs/stage1/layer-21-r64-{latest}
+    - outputs/runs/stage1/layer-22-r64-{latest}
 
 ```
 
@@ -145,11 +146,14 @@ python scripts/train_stage2.py --config configs/stage2.yaml
 训练完成后，所有结果将自动保存至指定 `outputs/...` 目录（*不重复保存庞大的冻结基座模型权重*）：
 
 ```text
-outputs/stage1-layer21/
-├── 📄 photonic_modules.pt      # 轻量化权重：替换模块的 P/B/C/b/R/theta 与各 Provider 的 EMA 状态
-├── 📄 photonic_config.json     # 模块配置元数据（包含 rank, z_dim, target_layers, teacher 名称等）
-├── 📄 run_config.yaml          # 实验可复现快照：包含输入 YAML 完整副本、硬件设备与 UTC 运行时间
-├── 📂 tokenizer/               # 关联的预训练 Tokenizer 完整文件 (便于后续评测与独立推理)
-└── 📂 best/                    # (仅阶段一) 验证集指标最佳时的 Checkpoint 备份目录
+outputs/runs/stage1/layer-21-r64-20260805-223826/
+├── 📄 photonic_modules.pt      # 当前最佳权重：替换模块的 P/B/C/b/R/theta 与各 Provider 的 EMA 状态
+├── 📄 run.json                 # checkpoint 结构、完整训练配置、设备、时间、最终与最佳指标
+├── 📄 training_log.csv         # 每个训练 step 的损失、诊断指标、验证结果与 SPSA 标记
+└── 📄 best_probe.pt            # 最佳权重在固定验证 batch 上的教师/学生 y，用于离线误差分析
 
 ```
+
+默认输出目录中的 `{timestamp}` 会在运行开始时展开为本地时间的 `YYYYMMDD-HHMMSS`，因此每次实验都有带日期时间的独立目录。阶段二配置中的 `{latest}` 会分别选择各目标层目录下时间最新的一次阶段一结果；如需指定特定实验，可将其替换为完整目录名。
+
+`best_probe.pt` 使用 PyTorch 格式保存固定验证 batch 的 `input_ids`、`attention_mask`、`labels`，以及每个目标层的 `teacher_y` 和 `student_y`（以 float16 保存）。文件仅在最佳 checkpoint 刷新时覆盖更新，不会在每个训练 step 重复保存。

@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
+from contextlib import ExitStack
 
 import torch
 
 from qkd.modeling import load_causal_lm, load_tokenizer
-from qkd.photonic.checkpoint import load_stage_one_checkpoints, save_compressed_checkpoint
-from qkd.photonic.model import make_compressed_student
-from qkd.training.tools import apply_overrides, load_config, make_loader, next_batch, provider_factory, section, training_device, write_run_config
+from qkd.photonic.checkpoint import load_stage_one_checkpoints
+from qkd.photonic.model import find_decoder_layers, make_compressed_student
+from qkd.training.artifacts import STAGE2_LOG_FIELDS, TrainingArtifacts, resolve_checkpoint_dir
 from qkd.training.spsa import SPSA
 from qkd.training.stage2_loss import stage_two_loss
+from qkd.training.tools import (
+    apply_overrides,
+    load_config,
+    make_loader,
+    next_batch,
+    provider_factory,
+    section,
+    training_device,
+)
 
 
 def arguments() -> argparse.Namespace:
@@ -28,20 +37,23 @@ def main() -> None:
     photonic, initialization = section(config, "photonic"), section(config, "initialization")
     optimization, logging = section(config, "optimization"), section(config, "logging")
     target_layers = tuple(int(index) for index in model["target_layers"])
-    checkpoint_dirs = initialization.get("stage1_checkpoints")
-    if not isinstance(checkpoint_dirs, list) or not checkpoint_dirs:
+    checkpoint_references = initialization.get("stage1_checkpoints")
+    if not isinstance(checkpoint_references, list) or not checkpoint_references:
         raise ValueError("initialization.stage1_checkpoints 必须提供覆盖全部目标层的目录列表")
+    checkpoint_dirs = [resolve_checkpoint_dir(path) for path in checkpoint_references]
+    initialization["stage1_checkpoints"] = [str(path) for path in checkpoint_dirs]
 
     torch.manual_seed(int(experiment["seed"]))
     device = training_device()
-    output = Path(experiment["output_dir"])
     teacher_name = str(model["teacher"])
     print(f"运行设备：{device}")
-    write_run_config(output, config, "stage2", device, {"status": "running", "teacher": teacher_name})
+    artifacts = TrainingArtifacts.create(config, "stage2", device, STAGE2_LOG_FIELDS, teacher_name)
+    output = artifacts.output
 
     tokenizer = load_tokenizer(teacher_name)
     train_loader = make_loader(str(data["train_data"]), tokenizer, int(data["batch_size"]), True)
     validation_loader = make_loader(str(data["validation_data"]), tokenizer, int(data["batch_size"]), False)
+    probe_batch = {key: value.to(device) for key, value in next(iter(validation_loader)).items()}
     teacher = load_causal_lm(teacher_name, trainable=False).to(device).eval()
     rank = int(compression["rank"])
     z_dim = int(compression["z_dim"])
@@ -64,7 +76,49 @@ def main() -> None:
     if early_stop_loss is not None and float(early_stop_loss) < 0:
         raise ValueError("optimization.early_stop_loss 必须为非负数或 null")
     stopped_early = False
+    best_loss = float("inf")
+    best_step: int | None = None
+    final_loss: float | None = None
     iterator = iter(train_loader)
+
+    @torch.no_grad()
+    def save_best_probe(step: int, loss: float) -> None:
+        teacher_layers, student_layers = find_decoder_layers(teacher), find_decoder_layers(student)
+        teacher_y: dict[int, torch.Tensor] = {}
+        student_y: dict[int, torch.Tensor] = {}
+
+        def capture(values: dict[int, torch.Tensor], index: int):
+            def hook(module, inputs, output_value) -> None:
+                values[index] = output_value.detach()
+            return hook
+
+        student.eval()
+        try:
+            with ExitStack() as stack:
+                for index in target_layers:
+                    stack.callback(teacher_layers[index].mlp.register_forward_hook(capture(teacher_y, index)).remove)
+                    stack.callback(student_layers[index].mlp.register_forward_hook(capture(student_y, index)).remove)
+                teacher(input_ids=probe_batch["input_ids"], attention_mask=probe_batch["attention_mask"])
+                student(input_ids=probe_batch["input_ids"], attention_mask=probe_batch["attention_mask"])
+            artifacts.save_best_probe({
+                "format": "qkd-best-probe-v1",
+                "stage": "stage2",
+                "step": step,
+                "selection": {"metric": "train_loss", "value": loss},
+                "target_layers": list(target_layers),
+                "input_ids": probe_batch["input_ids"].detach().cpu(),
+                "attention_mask": probe_batch["attention_mask"].detach().cpu(),
+                "labels": probe_batch["labels"].detach().cpu(),
+                "layers": {
+                    str(index): {
+                        "teacher_y": teacher_y[index].to("cpu", torch.float16),
+                        "student_y": student_y[index].to("cpu", torch.float16),
+                    }
+                    for index in target_layers
+                },
+            })
+        finally:
+            student.train()
 
     for step in range(1, int(optimization["steps"]) + 1):
         batch, iterator = next_batch(iterator, train_loader)
@@ -76,14 +130,29 @@ def main() -> None:
         terms["loss"].backward()
         optimizer.step()
         optimizer.zero_grad()
+        final_loss = terms["loss"].detach().float().item()
+        row = {
+            "step": step, "elapsed_seconds": artifacts.elapsed_seconds, "loss": final_loss,
+            "ce": terms["ce"].detach().float().item(), "kd": terms["kd"].detach().float().item(),
+            "is_best": False, "spsa_applied": False, "early_stopped": False,
+        }
 
-        if early_stop_loss is not None and terms["loss"].detach().float().item() <= float(early_stop_loss):
+        if final_loss < best_loss:
+            best_loss = final_loss
+            best_step = step
+            row["is_best"] = True
+            artifacts.save_checkpoint(replacements, rank, z_dim, kappa, target_layers, teacher_name, str(photonic["provider"]))
+            save_best_probe(step, final_loss)
+
+        if early_stop_loss is not None and final_loss <= float(early_stop_loss):
             stopped_early = True
-            print(f"stage2 提前停止：step={step} loss={terms['loss'].detach().float().item():.6f} <= {float(early_stop_loss):.6f}")
+            row["early_stopped"] = True
+            artifacts.log_step(row)
+            print(f"stage2 提前停止：step={step} loss={final_loss:.6f} <= {float(early_stop_loss):.6f}")
             break
 
         if step % int(logging["log_every"]) == 0:
-            print(f"stage2 step={step} loss={terms['loss'].detach().float().item():.4f} ce={terms['ce'].detach().float().item():.4f} kd={terms['kd'].detach().float().item():.4f}")
+            print(f"stage2 step={step} loss={final_loss:.4f} ce={row['ce']:.4f} kd={row['kd']:.4f}")
 
         if step % int(optimization["spsa_every"]) == 0:
             def validation_objective() -> torch.Tensor:
@@ -104,10 +173,10 @@ def main() -> None:
             for replacement in replacements:
                 for theta in (replacement.theta_gate, replacement.theta_up, replacement.theta_down):
                     spsa.step(theta, validation_objective)
+            row["spsa_applied"] = True
+        artifacts.log_step(row)
 
-    save_compressed_checkpoint(output, replacements, rank, z_dim, kappa, target_layers, teacher_name, str(photonic["provider"]))
-    tokenizer.save_pretrained(output)
-    write_run_config(output, config, "stage2", device, {"status": "early_stopped" if stopped_early else "completed", "teacher": teacher_name, "early_stop_loss": early_stop_loss})
+    artifacts.finish(status="early_stopped" if stopped_early else "completed", final_step=step, final_loss=final_loss, best_step=best_step, best_train_loss=best_loss, early_stop_loss=early_stop_loss)
     print(f"已保存阶段二条件化模块至 {output}")
 
 

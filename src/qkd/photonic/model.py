@@ -124,13 +124,3 @@ def make_compressed_student(teacher: nn.Module, provider_factory: Callable[[], P
     """复制冻结教师，并在副本中删除对应 MLP。"""
     student = deepcopy(teacher)
     return student, replace_final_mlps(student, provider_factory, rank, z_dim, kappa, target_layers)
-
-
-def static_fold_is_approximate(module: PhotonicLowRankMLP, mean_z: Tensor) -> dict[str, Tensor]:
-    """仅返回消融实验用的静态折叠矩阵，不等价于条件化推理。"""
-    folded: dict[str, Tensor] = {}
-    for name in ("gate", "up", "down"):
-        projection: ConditionedLowRankLinear = getattr(module, name)
-        g = 1 + 0.1 * torch.tanh(F.linear(mean_z, projection.C, projection.b))
-        folded[name] = projection.P @ torch.diag(g) @ projection.B
-    return folded
