@@ -29,6 +29,5 @@ optimization:
   spsa_perturbation: 0.05
   spsa_learning_rate: 0.01
 
-logging:
-  visualize_every: 20
-  validate_every: 200
+validation:
+  every: 200

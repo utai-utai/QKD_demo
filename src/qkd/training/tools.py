@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from contextlib import AbstractContextManager
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,165 @@ from torch.utils.data import DataLoader
 
 from qkd.data import TokenizedChatDataset, collate_tokenized
 from qkd.photonic import DeepQuantumCVFeatureProvider, MockPhotonicFeatureProvider
+from qkd.photonic.model import PhotonicLowRankMLP
+from qkd.training.stage1_loss import local_diagnostics, stage_one_loss
+from qkd.training.stage2_loss import stage_two_loss
+
+
+class StageOneReference(AbstractContextManager["StageOneReference"]):
+    """管理教师 MLP Hook，并提供阶段一训练与验证计算。"""
+
+    def __init__(
+        self,
+        teacher: torch.nn.Module,
+        teacher_mlp: torch.nn.Module,
+        student_mlp: PhotonicLowRankMLP,
+    ) -> None:
+        self.teacher = teacher
+        self.teacher_mlp = teacher_mlp
+        self.student_mlp = student_mlp
+        self.values: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._hook: Any = None
+
+    def __enter__(self) -> "StageOneReference":  # noqa: PYI034, UP037
+        self._hook = self.teacher_mlp.register_forward_hook(self._capture)
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        if self._hook is not None:
+            self._hook.remove()
+
+    def _capture(
+        self,
+        module: torch.nn.Module,
+        inputs: tuple[torch.Tensor, ...],
+        output: torch.Tensor,
+    ) -> None:
+        del module
+        self.values = (inputs[0].detach(), output.detach())
+
+    def terms(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """运行教师并计算当前批次的局部重建项。"""
+        self.values = None
+        with torch.no_grad():
+            self.teacher(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
+            if self.values is None:
+                raise RuntimeError("教师 MLP hook 未捕获到输出")
+            x, teacher_output = self.values
+            teacher_gate = self.teacher_mlp.gate_proj(x)
+            teacher_up = self.teacher_mlp.up_proj(x)
+        student_gate = self.student_mlp.gate(
+            x,
+            self.student_mlp.gate_provider,
+            self.student_mlp.theta_gate,
+            self.student_mlp.shots,
+        )
+        student_up = self.student_mlp.up(
+            x,
+            self.student_mlp.up_provider,
+            self.student_mlp.theta_up,
+            self.student_mlp.shots,
+        )
+        student_value = torch.nn.functional.silu(student_gate) * student_up
+        student_output = self.student_mlp.down(
+            student_value,
+            self.student_mlp.down_provider,
+            self.student_mlp.theta_down,
+            self.student_mlp.shots,
+        )
+        teacher_value = torch.nn.functional.silu(teacher_gate) * teacher_up
+        projected_teacher_value = self.student_mlp.down(
+            teacher_value,
+            self.student_mlp.down_provider,
+            self.student_mlp.theta_down,
+            self.student_mlp.shots,
+        )
+        return stage_one_loss(
+            student_gate,
+            student_up,
+            student_output,
+            projected_teacher_value,
+            teacher_gate,
+            teacher_up,
+            teacher_output,
+            batch["attention_mask"],
+        )
+
+    def diagnostics(
+        self, terms: dict[str, torch.Tensor], attention_mask: torch.Tensor
+    ) -> dict[str, float]:
+        """取得最近一次教师前向对应的终端诊断值。"""
+        if self.values is None:
+            raise RuntimeError("请先调用 terms")
+        x, teacher_output = self.values
+        with torch.no_grad():
+            teacher_gate = self.teacher_mlp.gate_proj(x)
+            teacher_up = self.teacher_mlp.up_proj(x)
+        return local_diagnostics(terms, teacher_gate, teacher_up, teacher_output, attention_mask)
+
+    @torch.no_grad()
+    def validate(
+        self, loader: DataLoader, student: torch.nn.Module, device: torch.device
+    ) -> tuple[float, dict[str, float]]:
+        """在完整验证集上计算 token 加权局部重建损失与诊断。"""
+        was_training = student.training
+        student.eval()
+        loss_sum, token_count, totals = 0.0, 0.0, {}
+        try:
+            for batch in loader:
+                batch = {key: value.to(device) for key, value in batch.items()}
+                terms = self.terms(batch)
+                metrics = self.diagnostics(terms, batch["attention_mask"])
+                valid = metrics.pop("valid_tokens")
+                loss_sum += terms["loss"].float().item() * valid
+                token_count += valid
+                for name, value in metrics.items():
+                    totals[name] = totals.get(name, 0.0) + value * valid
+        finally:
+            student.train(was_training)
+        return loss_sum / token_count, {name: value / token_count for name, value in totals.items()}
+
+    @torch.no_grad()
+    def spsa_objective(self, batch: dict[str, torch.Tensor], student: torch.nn.Module) -> torch.Tensor:
+        """以评估模式计算单个验证批次的 SPSA 目标。"""
+        was_training = student.training
+        student.eval()
+        try:
+            return self.terms(batch)["loss"]
+        finally:
+            student.train(was_training)
+
+
+@torch.no_grad()
+def stage_two_validation_objective(
+    student: torch.nn.Module,
+    teacher: torch.nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    temperature: float,
+    top_k: int,
+) -> torch.Tensor:
+    """计算完整验证集的 Stage 2 蒸馏目标，供 SPSA 调用。"""
+    was_training = student.training
+    student.eval()
+    try:
+        values = []
+        for batch in loader:
+            batch = {key: value.to(device) for key, value in batch.items()}
+            teacher_logits = teacher(
+                input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
+            ).logits
+            student_logits = student(
+                input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
+            ).logits
+            values.append(
+                stage_two_loss(student_logits, teacher_logits, batch["labels"], temperature, top_k)[
+                    "loss"
+                ]
+            )
+        return torch.stack(values).mean()
+    finally:
+        student.train(was_training)
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
