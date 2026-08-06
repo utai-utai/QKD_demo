@@ -51,20 +51,24 @@ def main() -> None:
     rank = int(compression["rank"])
     z_dim = int(compression["z_dim"])
     kappa = float(compression["kappa"])
+    n_modes, n_layers = int(photonic["modes"]), int(photonic["layers"])
     student, replacements = make_compressed_student(
-        teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay")),
+        teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers),
         rank, z_dim, kappa, target_layers,
     )
     for replacement in replacements:
         replacement.shots = photonic.get("shots")
     load_stage_one_checkpoints(checkpoint_dirs, replacements, rank, z_dim, kappa, target_layers, str(photonic["provider"]))
     student.to(device).train()
-    optimizer = torch.optim.Adam((parameter for replacement in replacements for parameter in replacement.adam_parameters()), lr=float(optimization["adam_learning_rate"]))
-    spsa = SPSA(
-        perturbation=float(optimization["spsa_perturbation"]),
-        learning_rate=float(optimization["spsa_learning_rate"]),
-        seed=int(experiment["seed"]),
+    optimizer = torch.optim.Adam(
+        (parameter for replacement in replacements for parameter in (*replacement.adam_parameters(), *replacement.photonic_parameters())),
+        lr=float(optimization["adam_learning_rate"]),
     )
+    # spsa = SPSA(
+    #     perturbation=float(optimization["spsa_perturbation"]),
+    #     learning_rate=float(optimization["spsa_learning_rate"]),
+    #     seed=int(experiment["seed"]),
+    # )
     early_stop_loss = optimization.get("early_stop_loss")
     if early_stop_loss is not None and float(early_stop_loss) < 0:
         raise ValueError("optimization.early_stop_loss 必须为非负数或 null")
@@ -86,7 +90,7 @@ def main() -> None:
         finally:
             student.train()
 
-    # 4. 端到端蒸馏：CE + Top-K KD；SPSA 仍只更新光子参数。
+    # 4. 端到端蒸馏：CE + Top-K KD；P/B 冻结，光路参数通过 autograd 优化。
     layer_label = ",".join(str(index) for index in target_layers)
     progress = tqdm(range(1, int(optimization["steps"]) + 1), desc=f"Stage 2 · layers {layer_label}", unit="step")
     for step in progress:
@@ -125,14 +129,7 @@ def main() -> None:
             progress.set_postfix(loss=f"{final_loss:.4f}", stopped=True)
             break
 
-        if step % int(optimization["spsa_every"]) == 0:
-            validation_objective = partial(stage_two_validation_objective, student, teacher, validation_loader, device, float(optimization["temperature"]), int(optimization["top_k"]))
-            spsa.step_many(
-                (theta for replacement in replacements for theta in (replacement.theta_gate, replacement.theta_up, replacement.theta_down)),
-                validation_objective,
-                f"Stage 2 SPSA · step {step}",
-            )
-            row["spsa_applied"] = True
+        # 保留 SPSA 模块与配置以便后续非可微硬件后端；当前可微模拟不调用它。
         artifacts.log_step(row)
         progress.set_postfix(loss=f"{final_loss:.4f}", ce=f"{row['ce']:.4f}", kd=f"{row['kd']:.4f}")
 

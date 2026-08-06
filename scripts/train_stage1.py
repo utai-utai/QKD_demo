@@ -54,19 +54,23 @@ def main() -> None:
     rank = int(compression["rank"])
     z_dim = int(compression["z_dim"])
     kappa = float(compression["kappa"])
+    n_modes, n_layers = int(photonic["modes"]), int(photonic["layers"])
     student, replacements = make_compressed_student(
-        teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay")),
+        teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers),
         rank, z_dim, kappa, target_layers,
     )
     replacement = replacements[0]
     replacement.shots = photonic.get("shots")
     student.to(device).train()
-    optimizer = torch.optim.Adam(replacement.adam_parameters(), lr=float(optimization["adam_learning_rate"]))
-    spsa = SPSA(
-        perturbation=float(optimization["spsa_perturbation"]),
-        learning_rate=float(optimization["spsa_learning_rate"]),
-        seed=int(experiment["seed"]),
+    optimizer = torch.optim.Adam(
+        (*replacement.adam_parameters(), *replacement.photonic_parameters()),
+        lr=float(optimization["adam_learning_rate"]),
     )
+    # spsa = SPSA(
+    #     perturbation=float(optimization["spsa_perturbation"]),
+    #     learning_rate=float(optimization["spsa_learning_rate"]),
+    #     seed=int(experiment["seed"]),
+    # )
     early_stop_loss = optimization.get("early_stop_loss")
     if early_stop_loss is not None and float(early_stop_loss) < 0:
         raise ValueError("optimization.early_stop_loss 必须为非负数或 null")
@@ -90,7 +94,7 @@ def main() -> None:
             finally:
                 student.train()
 
-        # 4. 训练循环：Adam 更新低秩参数，SPSA 更新光子参数。
+        # 4. 训练循环：Adam 仅更新 C/b 与 DeepQuantum 可微光路参数；P/B 保持冻结。
         iterator = iter(train_loader)
         progress = tqdm(range(1, int(optimization["steps"]) + 1), desc=f"Stage 1 · layer {target}", unit="step")
         for step in progress:
@@ -125,16 +129,7 @@ def main() -> None:
                 progress.set_postfix(loss=f"{final_loss:.4f}", stopped=True)
                 break
 
-            if step % int(optimization["spsa_every"]) == 0:
-                validation = next(iter(validation_loader))
-                validation = {key: value.to(device) for key, value in validation.items()}
-                spsa.step_many(
-                    (replacement.theta_gate, replacement.theta_up, replacement.theta_down),
-                    partial(reference.spsa_objective, validation, student),
-                    f"Stage 1 SPSA · step {step}",
-                )
-                row["spsa_applied"] = True
-
+            # 保留 spsa 配置与实现以便后续硬件实验；当前可微模拟不调用 SPSA。
             postfix = {"loss": f"{final_loss:.4f}"}
             if int(validation_settings["every"]) and step % int(validation_settings["every"]) == 0:
                 validation_loss, metrics = reference.validate(validation_loader, student, device)

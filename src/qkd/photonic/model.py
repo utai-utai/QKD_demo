@@ -48,8 +48,9 @@ class ConditionedLowRankLinear(nn.Module):
         if rank < z_dim:
             raise ValueError("当前光子设计要求 rank 不小于 z_dim")
         p, b = _svd_factors(teacher_target, rank)
-        self.P = nn.Parameter(p)
-        self.B = nn.Parameter(b)
+        # 截断 SVD 提供固定低秩基；训练仅学习条件化门控 C/b。
+        self.P = nn.Parameter(p, requires_grad=False)
+        self.B = nn.Parameter(b, requires_grad=False)
         self.C = nn.Parameter(torch.zeros(rank, z_dim, dtype=p.dtype, device=p.device))
         self.b = nn.Parameter(torch.zeros(rank, dtype=p.dtype, device=p.device))
         generator = torch.Generator(device="cpu").manual_seed(seed)
@@ -58,10 +59,10 @@ class ConditionedLowRankLinear(nn.Module):
         self.register_buffer("R", orthogonal[:z_dim].to(dtype=p.dtype, device=p.device))
         self.kappa = kappa
 
-    def forward(self, states: Tensor, provider: PhotonicFeatureProvider, theta: Tensor, shots: int | None) -> Tensor:
+    def forward(self, states: Tensor, provider: PhotonicFeatureProvider, shots: int | None) -> Tensor:
         t = F.linear(states, self.B)
         encoded = self.kappa * torch.tanh(F.linear(t, self.R))
-        z = provider.sample(encoded, theta, shots, states.device)
+        z = provider.sample(encoded, shots, states.device)
         z = z.to(device=t.device, dtype=self.C.dtype)
         gate = 1 + 0.1 * torch.tanh(F.linear(z, self.C, self.b))
         return F.linear(gate * t, self.P)
@@ -74,26 +75,27 @@ class PhotonicLowRankMLP(nn.Module):
         for name in ("gate_proj", "up_proj", "down_proj"):
             if not isinstance(getattr(old_mlp, name, None), nn.Linear):
                 raise TypeError(f"MLP lacks a linear {name}")
-        # 三个 W 完全独立：不共享线路实例、量子态、theta 或 EMA。
+        # 三个 W 完全独立：不共享线路实例、光路参数或 EMA。
         self.gate = ConditionedLowRankLinear(old_mlp.gate_proj, rank, z_dim, kappa, layer_index * 11 + 1)
         self.up = ConditionedLowRankLinear(old_mlp.up_proj, rank, z_dim, kappa, layer_index * 11 + 2)
-        self.down = ConditionedLowRankLinear(old_mlp.down_proj, rank, z_dim, kappa, layer_index * 11 + 3)
+        self.down = ConditionedLowRankLinear(old_mlp.down_proj, 2 * rank, z_dim, kappa, layer_index * 11 + 3)
         self.gate_provider = provider_factory()
         self.up_provider = provider_factory()
         self.down_provider = provider_factory()
-        self.theta_gate = nn.Parameter(torch.zeros(z_dim), requires_grad=False)
-        self.theta_up = nn.Parameter(torch.zeros(z_dim), requires_grad=False)
-        self.theta_down = nn.Parameter(torch.zeros(z_dim), requires_grad=False)
         self.shots: int | None = None
 
     def forward(self, hidden_states: Tensor) -> Tensor:
-        gate = self.gate(hidden_states, self.gate_provider, self.theta_gate, self.shots)
-        up = self.up(hidden_states, self.up_provider, self.theta_up, self.shots)
-        return self.down(F.silu(gate) * up, self.down_provider, self.theta_down, self.shots)
+        gate = self.gate(hidden_states, self.gate_provider, self.shots)
+        up = self.up(hidden_states, self.up_provider, self.shots)
+        return self.down(F.silu(gate) * up, self.down_provider, self.shots)
 
     def adam_parameters(self) -> Iterator[nn.Parameter]:
         for projection in (self.gate, self.up, self.down):
-            yield from (projection.P, projection.B, projection.C, projection.b)
+            yield from (projection.C, projection.b)
+
+    def photonic_parameters(self) -> Iterator[nn.Parameter]:
+        for provider in (self.gate_provider, self.up_provider, self.down_provider):
+            yield from provider.parameters()
 
 
 def freeze_non_mlp_modules(model: nn.Module) -> None:

@@ -64,27 +64,23 @@ class StageOneReference(AbstractContextManager["StageOneReference"]):
         student_gate = self.student_mlp.gate(
             x,
             self.student_mlp.gate_provider,
-            self.student_mlp.theta_gate,
             self.student_mlp.shots,
         )
         student_up = self.student_mlp.up(
             x,
             self.student_mlp.up_provider,
-            self.student_mlp.theta_up,
             self.student_mlp.shots,
         )
         student_value = torch.nn.functional.silu(student_gate) * student_up
         student_output = self.student_mlp.down(
             student_value,
             self.student_mlp.down_provider,
-            self.student_mlp.theta_down,
             self.student_mlp.shots,
         )
         teacher_value = torch.nn.functional.silu(teacher_gate) * teacher_up
         projected_teacher_value = self.student_mlp.down(
             teacher_value,
             self.student_mlp.down_provider,
-            self.student_mlp.theta_down,
             self.student_mlp.shots,
         )
         return stage_one_loss(
@@ -235,10 +231,14 @@ def training_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def provider_factory(name: str, z_dim: int, ema_decay: float | None):
+def provider_factory(name: str, z_dim: int, ema_decay: float | None, n_modes: int, n_layers: int):
     """为每个 W 返回独立 provider 的构造器。"""
     if name == "mock":
-        return lambda: MockPhotonicFeatureProvider(z_dim=z_dim, ema_decay=ema_decay)
+        return lambda: MockPhotonicFeatureProvider(
+            z_dim=z_dim, ema_decay=ema_decay, n_modes=n_modes, n_layers=n_layers
+        )
     if name == "deepquantum":
-        return lambda: DeepQuantumCVFeatureProvider(z_dim=z_dim, ema_decay=ema_decay)
+        return lambda: DeepQuantumCVFeatureProvider(
+            z_dim=z_dim, ema_decay=ema_decay, n_modes=n_modes, n_layers=n_layers
+        )
     raise ValueError(f"不支持的光子 provider：{name}")
