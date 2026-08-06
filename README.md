@@ -164,11 +164,13 @@ outputs/runs/stage1/layer-21-r64-20260805-223826/
 
 使用 `scripts/plot_training_log.py` 只从 `outputs/runs` 选择同一 Stage 的运行并绘制指定列，横轴固定为 `step`。运行名省略 rank 与日期时会自动选择最新一次；例如 `layer-21` 会匹配最新的 Layer 21 Stage 1 运行。
 
+多个 Stage 1 层可用 `layer-[0,1]` 列表简写，等价于传入 `layer-0 layer-1`；`layer-[0:24]` 会包含端点并展开为 `layer-0` 至 `layer-24`。
+
 比较多个 Stage 1 单层运行：
 
 ```bash
 python scripts/plot_training_log.py \
-  --runs layer-21 layer-22 \
+  --runs 'layer-[21,22]' \
   --metrics train_loss y_nmse
 ```
 
@@ -177,7 +179,8 @@ python scripts/plot_training_log.py \
 ```bash
 python scripts/plot_training_log.py \
   --runs layers-21-22-23 \
-  --metrics loss ce kd
+  --metrics loss ce kd \
+  --log-y
 ```
 
-同一运行内比较时，图例显示指标名；跨运行比较时，同一运行使用相同颜色、不同指标使用不同线型，图例只显示运行名。图片会自动保存到 `outputs/analysis/stage1/` 或 `outputs/analysis/stage2/`，文件名统一为 `layer-21-22-23_train_loss-y_nmse.png` 这类“层索引_指标”格式；Stage 1 与 Stage 2 不能混合比较。
+同一运行内比较时，图例显示指标名；跨运行比较时，同一运行使用相同颜色、不同指标使用不同线型，图例只显示运行名。加入 `--log-y` 可使用对数纵坐标，输出文件名会追加 `-log-y`。图片会自动保存到 `outputs/analysis/stage1/` 或 `outputs/analysis/stage2/`，文件名统一为 `layer-21-22-23_train_loss-y_nmse.png` 这类“层索引_指标”格式；Stage 1 与 Stage 2 不能混合比较。
