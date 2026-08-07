@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from qkd.modeling import load_causal_lm, load_tokenizer
 from qkd.photonic.model import find_decoder_layers, make_compressed_student
-from qkd.training.artifacts import STAGE1_LOG_FIELDS, TrainingArtifacts, best_probe_payload
+from qkd.training.artifacts import TrainingArtifacts, best_probe_payload, stage1_photonic_log_fields
 from qkd.training.spsa import SPSA
 from qkd.training.tools import StageOneReference, apply_overrides, load_config, make_loader, next_batch, provider_factory, section, training_device
 
@@ -39,7 +39,8 @@ def main() -> None:
     torch.manual_seed(int(experiment["seed"]))
     device = training_device()
     teacher_name = str(model["teacher"])
-    artifacts = TrainingArtifacts.create(config, "stage1", device, STAGE1_LOG_FIELDS)
+    n_modes, n_layers = int(photonic["modes"]), int(photonic["layers"])
+    artifacts = TrainingArtifacts.create(config, "stage1", device, stage1_photonic_log_fields(n_modes, n_layers))
 
     # 2. 数据、教师模型与待训练的单层学生 MLP
     tokenizer = load_tokenizer(teacher_name)
@@ -54,7 +55,6 @@ def main() -> None:
     rank = int(compression["rank"])
     z_dim = int(compression["z_dim"])
     kappa = float(compression["kappa"])
-    n_modes, n_layers = int(photonic["modes"]), int(photonic["layers"])
     student, replacements = make_compressed_student(
         teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers),
         rank, z_dim, kappa, target_layers,
@@ -120,6 +120,7 @@ def main() -> None:
                 "is_best": False,
                 "spsa_applied": False,
                 "early_stopped": False,
+                **replacement.photonic_parameter_values(),
             }
 
             if early_stop_loss is not None and final_loss <= float(early_stop_loss):

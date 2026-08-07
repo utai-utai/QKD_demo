@@ -59,7 +59,8 @@ class MockPhotonicFeatureProvider(PhotonicFeatureProvider):
 
     def _mock_photon_numbers(self, encoded: Tensor) -> Tensor:
         """与 DeepQuantum 拓扑一致的可微快速替代器，用于 CPU 冒烟测试。"""
-        amplitudes = torch.complex(torch.tanh(encoded[..., : self.n_modes]), torch.zeros_like(encoded[..., : self.n_modes]))
+        # 前半是 x 位移（复振幅实部），后半是 p 位移/输入相位（虚部）。
+        amplitudes = torch.complex(torch.tanh(encoded[..., : self.n_modes]), torch.tanh(encoded[..., self.n_modes :]))
         theta_index = 0
         for layer in range(self.n_layers):
             for wire_a, wire_b in self.pairs:

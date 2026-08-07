@@ -17,6 +17,7 @@ import torch
 from torch import nn
 
 from qkd.photonic.checkpoint import checkpoint_metadata, save_compressed_modules
+from qkd.photonic.circuit import circuit_layout
 from qkd.photonic.model import PhotonicLowRankMLP, find_decoder_layers
 
 STAGE1_LOG_FIELDS = [
@@ -53,6 +54,16 @@ STAGE1_LOG_FIELDS = [
     "spsa_applied",
     "early_stopped",
 ]
+
+
+def stage1_photonic_log_fields(n_modes: int, n_layers: int) -> list[str]:
+    """为三个独立光路生成逐参数 CSV 列名。"""
+    _, n_theta, n_phi = circuit_layout(n_modes, n_layers)
+    fields = list(STAGE1_LOG_FIELDS)
+    for projection in ("gate", "up", "down"):
+        fields.extend(f"{projection}_theta_{index:02d}" for index in range(n_theta))
+        fields.extend(f"{projection}_phi_{index:02d}" for index in range(n_phi))
+    return fields
 STAGE2_LOG_FIELDS = [
     "step",
     "elapsed_seconds",

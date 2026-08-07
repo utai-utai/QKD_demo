@@ -97,6 +97,20 @@ class PhotonicLowRankMLP(nn.Module):
         for provider in (self.gate_provider, self.up_provider, self.down_provider):
             yield from provider.parameters()
 
+    @torch.no_grad()
+    def photonic_parameter_values(self) -> dict[str, float]:
+        """返回更新后的三套光路 theta/phi，供逐 step CSV 记录。"""
+        values: dict[str, float] = {}
+        for projection, provider in (
+            ("gate", self.gate_provider),
+            ("up", self.up_provider),
+            ("down", self.down_provider),
+        ):
+            for parameter_name in ("theta", "phi"):
+                parameter = getattr(provider, parameter_name).detach().float().cpu().reshape(-1)
+                values.update({f"{projection}_{parameter_name}_{index:02d}": value for index, value in enumerate(parameter.tolist())})
+        return values
+
 
 def freeze_non_mlp_modules(model: nn.Module) -> None:
     for parameter in model.parameters():

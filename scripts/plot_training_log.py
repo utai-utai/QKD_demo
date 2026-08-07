@@ -190,9 +190,12 @@ def _output_path(stage: str, selectors: list[str], metrics: list[str], log_y: bo
 
 def _layer_filename(selectors: list[str]) -> str:
     """将 layer-21 与 layers-21-22 等选择器统一为紧凑层索引名称。"""
+    normalized = [_normalize_selector(selector) for selector in selectors]
+    if any(not re.fullmatch(r"layer-\d+", selector) for selector in normalized):
+        return "-vs-".join(_filename_part(selector) for selector in normalized)
     layers = []
-    for selector in selectors:
-        match = re.match(r"layers?-(\d+(?:-\d+)*)", _normalize_selector(selector))
+    for selector in normalized:
+        match = re.match(r"layers?-(\d+(?:-\d+)*)", selector)
         if match is None:
             return "-vs-".join(_filename_part(value) for value in selectors)
         layers.extend(match.group(1).split("-"))
@@ -200,7 +203,10 @@ def _layer_filename(selectors: list[str]) -> str:
 
 
 def _legend_label(run_name: str) -> str:
-    """从运行目录名移除 rank 与时间戳，只保留层索引。"""
+    """从运行目录名生成紧凑而不丢失超参数的图例标签。"""
+    grid = re.match(r"layer-(\d+)-r(\d+)-seed(\d+)-", run_name)
+    if grid:
+        return f"layer-{grid.group(1)} · r{grid.group(2)} · seed-{grid.group(3)}"
     match = re.match(r"layers?-(\d+(?:-\d+)*)", run_name)
     return f"layer-{match.group(1)}" if match else run_name
 

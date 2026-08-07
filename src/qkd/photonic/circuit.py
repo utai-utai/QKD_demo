@@ -48,8 +48,9 @@ def layered_photon_numbers(
     batch_size = values.shape[0]
     covariance = torch.eye(2 * n_modes, dtype=values.dtype, device=values.device).expand(batch_size, -1, -1)
     mean = values.new_zeros(batch_size, 2 * n_modes, 1)
-    # xxpp 排列：前 n_modes 项是 x 象限。tanh 与旧版位移编码保持同一数值范围。
+    # xxpp 排列：前 n_modes 是 x 位移，后 n_modes 是 p 位移（输入相位）。
     mean[:, :n_modes, 0] = torch.tanh(values[:, :n_modes])
+    mean[:, n_modes:, 0] = torch.tanh(values[:, n_modes:])
     circuit(state=[covariance, mean])
     photon_numbers, _ = circuit.photon_number_mean_var(wires=list(range(n_modes)))
     return photon_numbers.reshape(*encoded.shape[:-1], n_modes)
