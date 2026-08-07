@@ -90,7 +90,7 @@ def main() -> None:
         finally:
             student.train()
 
-    # 4. 端到端蒸馏：CE + Top-K KD；P/B 冻结，光路参数通过 autograd 优化。
+    # 4. 端到端蒸馏：CE + Top-K KD；P/B 冻结，C 与光路参数通过 autograd 优化。
     layer_label = ",".join(str(index) for index in target_layers)
     progress = tqdm(range(1, int(optimization["steps"]) + 1), desc=f"Stage 2 · layers {layer_label}", unit="step")
     for step in progress:

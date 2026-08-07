@@ -94,7 +94,7 @@ def main() -> None:
             finally:
                 student.train()
 
-        # 4. 训练循环：Adam 仅更新 C/b 与 DeepQuantum 可微光路参数；P/B 保持冻结。
+        # 4. 训练循环：Adam 仅更新 C 与 DeepQuantum 可微光路参数；P/B 保持冻结。
         iterator = iter(train_loader)
         progress = tqdm(range(1, int(optimization["steps"]) + 1), desc=f"Stage 1 · layer {target}", unit="step")
         for step in progress:

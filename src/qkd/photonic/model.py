@@ -48,11 +48,10 @@ class ConditionedLowRankLinear(nn.Module):
         if rank < z_dim:
             raise ValueError("当前光子设计要求 rank 不小于 z_dim")
         p, b = _svd_factors(teacher_target, rank)
-        # 截断 SVD 提供固定低秩基；训练仅学习条件化门控 C/b。
+        # 截断 SVD 提供固定低秩基；训练仅学习无偏置的条件化门控 C。
         self.P = nn.Parameter(p, requires_grad=False)
         self.B = nn.Parameter(b, requires_grad=False)
         self.C = nn.Parameter(torch.zeros(rank, z_dim, dtype=p.dtype, device=p.device))
-        self.b = nn.Parameter(torch.zeros(rank, dtype=p.dtype, device=p.device))
         generator = torch.Generator(device="cpu").manual_seed(seed)
         # 先生成 rank×rank 正交矩阵，再取前 z_dim 行，确保 R 始终为 [z_dim, rank]，即使 rank 大于 z_dim 也保持行正交。
         orthogonal, _ = torch.linalg.qr(torch.randn(rank, rank, generator=generator))
@@ -64,7 +63,7 @@ class ConditionedLowRankLinear(nn.Module):
         encoded = self.kappa * torch.tanh(F.linear(t, self.R))
         z = provider.sample(encoded, shots, states.device)
         z = z.to(device=t.device, dtype=self.C.dtype)
-        gate = 1 + 0.1 * torch.tanh(F.linear(z, self.C, self.b))
+        gate = 1 + 0.1 * torch.tanh(F.linear(z, self.C))
         return F.linear(gate * t, self.P)
 
 
@@ -91,7 +90,7 @@ class PhotonicLowRankMLP(nn.Module):
 
     def adam_parameters(self) -> Iterator[nn.Parameter]:
         for projection in (self.gate, self.up, self.down):
-            yield from (projection.C, projection.b)
+            yield projection.C
 
     def photonic_parameters(self) -> Iterator[nn.Parameter]:
         for provider in (self.gate_provider, self.up_provider, self.down_provider):
