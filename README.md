@@ -15,7 +15,7 @@
 
 一个标准的 SwiGLU MLP 包含 **Gate** (`gate_proj`)、**Up** (`up_proj`) 和 **Down** (`down_proj`) 三个线性投影通道。每个投影通道均由教师权重的 rank-$r$ 截断 SVD 初始化，并融合光子电路演化：
 
-$$\begin{aligned} t &= B \cdot s & \text{(1. 截断 SVD 低秩基底映射，}P/B\text{ 冻结)} \\ e &= \kappa \cdot \tanh(R \cdot t) & \text{(2. 特征压缩并映射至光子电路输入空间，} R \text{ 为正交投影)} \\ z &= Q_{\theta,\phi}(e) & \text{(3. 可微四层八模 BS→PS 电路/Mock)} \\ g &= 1 + 0.1 \cdot \tanh(C \cdot z) & \text{(4. 训练 }C/b\text{ 生成条件化增益)} \\ q(s) &= P \cdot (g \odot t) & \text{(5. 门控调制与低秩特征重构)} \end{aligned}$$
+$$\begin{aligned} t &= B \cdot x & \text{(1. 截断 SVD 低秩基底映射，}P/B\text{ 冻结)} \\ e &= \kappa \cdot \tanh(R \cdot t) & \text{(2. 特征压缩并映射至光子电路输入空间，} R \text{ 为正交投影)} \\ z &= Q_{\theta,\phi}(e) & \text{(3. 可微四层八模 BS→PS 电路/Mock)} \\ g &= 1 + 0.1 \cdot \tanh(C \cdot z) & \text{(4. 训练 }C/b\text{ 生成条件化增益)} \\ \text{output}(x) &= P \cdot (g \odot t) & \text{(5. 门控调制与低秩特征重构)} \end{aligned}$$
 
 ### ⚛️ 光子特征提供器 ($Q_\theta$)
 
@@ -68,9 +68,9 @@ QKD_demo/
 除直接修改 YAML 外，也可用可重复的 `--set '段.键=YAML值'` 临时覆盖参数；实际生效的配置、checkpoint 结构信息与训练结果摘要会合并保存到输出目录的 `run.json`；逐 step 指标会保存为 `training_log.csv`。例如：
 
 ```bash
-python scripts/train_stage1.py --config configs/stage1.yaml \
+python scripts/train_stage1.py --config configs/stage1_old.yaml \
   --set 'model.target_layers=[22]' \
-  --set 'experiment.output_dir=outputs/runs/stage1/layer-22-r64-{timestamp}'
+  --set 'experiment.output_dir=outputs/runs_old/stage1_old/layer-22-r64-{timestamp}'
 ```
 
 ```
@@ -99,7 +99,7 @@ python scripts/prepare_data.py \
 在 `configs/stage1.yaml` 中设置单目标层（例如 `target_layers: [21]`），运行训练：
 
 ```bash
-python scripts/train_stage1.py --config configs/stage1.yaml
+python scripts/train_stage1.py --config configs/stage1_old.yaml
 
 ```
 
@@ -113,8 +113,8 @@ python scripts/train_stage1.py --config configs/stage1.yaml
 ```yaml
 initialization:
   stage1_checkpoints:
-    - outputs/runs/stage1/layer-21-r64-{latest}
-    - outputs/runs/stage1/layer-22-r64-{latest}
+    - outputs/runs_old/stage1_old/layer-21-r64-{latest}
+    - outputs/runs_old/stage1_old/layer-22-r64-{latest}
 
 ```
 
@@ -171,7 +171,7 @@ outputs/runs/stage1/layer-21-r64-20260805-223826/
 
 ```bash
 python scripts/plot_training_log.py \
-  --runs 'layer-[21,22]' \
+  --runs_old 'layer-[21,22]' \
   --metrics train_loss y_nmse
 ```
 
@@ -179,7 +179,7 @@ python scripts/plot_training_log.py \
 
 ```bash
 python scripts/plot_training_log.py \
-  --runs layers-21-22-23 \
+  --runs_old layers-21-22-23 \
   --metrics loss ce kd \
   --log-y
 ```

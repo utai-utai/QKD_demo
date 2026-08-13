@@ -10,6 +10,7 @@ from typing import Any
 
 import torch
 import yaml
+from tqdm import tqdm
 from torch.utils.data import DataLoader
 
 from qkd.data import TokenizedChatDataset, collate_tokenized
@@ -115,7 +116,8 @@ class StageOneReference(AbstractContextManager["StageOneReference"]):
         student.eval()
         loss_sum, token_count, totals = 0.0, 0.0, {}
         try:
-            for batch in loader:
+            progress = tqdm(loader, desc="Stage 1 validation", unit="batch", leave=False)
+            for batch in progress:
                 batch = {key: value.to(device) for key, value in batch.items()}
                 terms = self.terms(batch)
                 metrics = self.diagnostics(terms, batch["attention_mask"])
@@ -124,6 +126,7 @@ class StageOneReference(AbstractContextManager["StageOneReference"]):
                 token_count += valid
                 for name, value in metrics.items():
                     totals[name] = totals.get(name, 0.0) + value * valid
+                progress.set_postfix(loss=f"{loss_sum / token_count:.4f}")
         finally:
             student.train(was_training)
         return loss_sum / token_count, {name: value / token_count for name, value in totals.items()}

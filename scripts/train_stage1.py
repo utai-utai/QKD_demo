@@ -40,7 +40,7 @@ def main() -> None:
     device = training_device()
     teacher_name = str(model["teacher"])
     n_modes, n_layers = int(photonic["modes"]), int(photonic["layers"])
-    artifacts = TrainingArtifacts.create(config, "stage1", device, stage1_photonic_log_fields(n_modes, n_layers))
+    artifacts = TrainingArtifacts.create(config, "stage1_old", device, stage1_photonic_log_fields(n_modes, n_layers))
 
     # 2. 数据、教师模型与待训练的单层学生 MLP
     tokenizer = load_tokenizer(teacher_name)
@@ -90,7 +90,7 @@ def main() -> None:
                 if reference.values is None:
                     raise RuntimeError("教师 MLP hook 未捕获到输出")
                 _, teacher_y = reference.values
-                artifacts.save_best_probe(best_probe_payload("stage1", step, metric_name, metric_value, target_layers, probe_batch, {target: teacher_y}, {target: details["output"]}))
+                artifacts.save_best_probe(best_probe_payload("stage1_old", step, metric_name, metric_value, target_layers, probe_batch, {target: teacher_y}, {target: details["output"]}))
             finally:
                 student.train()
 

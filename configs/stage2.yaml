@@ -25,9 +25,9 @@ photonic:
 
 initialization:
   stage1_checkpoints:
-    - outputs/runs/stage1/layer-21-r64-{latest}
-    - outputs/runs/stage1/layer-22-r64-{latest}
-    - outputs/runs/stage1/layer-23-r64-{latest}
+    - outputs/runs/stage1_old/layer-21-r64-{latest}
+    - outputs/runs/stage1_old/layer-22-r64-{latest}
+    - outputs/runs/stage1_old/layer-23-r64-{latest}
 
 optimization:
   steps: 100

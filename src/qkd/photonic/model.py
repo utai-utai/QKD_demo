@@ -43,7 +43,15 @@ def _svd_factors(linear: nn.Module | Tensor, rank: int) -> tuple[Tensor, Tensor]
 
 class ConditionedLowRankLinear(nn.Module):
     """以教师线性层的截断 SVD 初始化 ``P (g(z) ⊙ (B s))``。"""
-    def __init__(self, teacher_target: nn.Module | Tensor, rank: int, z_dim: int, kappa: float, seed: int) -> None:
+    def __init__(
+        self,
+        teacher_target: nn.Module | Tensor,
+        rank: int,
+        z_dim: int,
+        kappa: float,
+        seed: int,
+        gate_scale: float = 0.1,
+    ) -> None:
         super().__init__()
         if rank < z_dim:
             raise ValueError("当前光子设计要求 rank 不小于 z_dim")
@@ -57,27 +65,37 @@ class ConditionedLowRankLinear(nn.Module):
         orthogonal, _ = torch.linalg.qr(torch.randn(rank, rank, generator=generator))
         self.register_buffer("R", orthogonal[:z_dim].to(dtype=p.dtype, device=p.device))
         self.kappa = kappa
+        self.gate_scale = gate_scale
 
-    def forward(self, states: Tensor, provider: PhotonicFeatureProvider, shots: int | None) -> Tensor:
-        t = F.linear(states, self.B)
+    def forward(self, x: Tensor, provider: PhotonicFeatureProvider, shots: int | None) -> Tensor:
+        t = F.linear(x, self.B)
         encoded = self.kappa * torch.tanh(F.linear(t, self.R))
-        z = provider.sample(encoded, shots, states.device)
+        z = provider.sample(encoded, shots, x.device)
         z = z.to(device=t.device, dtype=self.C.dtype)
-        gate = 1 + 0.1 * torch.tanh(F.linear(z, self.C))
+        gate = 1 + self.gate_scale * torch.tanh(F.linear(z, self.C))
         return F.linear(gate * t, self.P)
 
 
 class PhotonicLowRankMLP(nn.Module):
     """三个投影各自使用独立 provider、theta 与 EMA 的 SwiGLU 替换模块。"""
-    def __init__(self, old_mlp: nn.Module, provider_factory: Callable[[], PhotonicFeatureProvider], rank: int, z_dim: int, kappa: float, layer_index: int) -> None:
+    def __init__(
+        self,
+        old_mlp: nn.Module,
+        provider_factory: Callable[[], PhotonicFeatureProvider],
+        rank: int,
+        z_dim: int,
+        kappa: float,
+        layer_index: int,
+        gate_scale: float = 0.1,
+    ) -> None:
         super().__init__()
         for name in ("gate_proj", "up_proj", "down_proj"):
             if not isinstance(getattr(old_mlp, name, None), nn.Linear):
                 raise TypeError(f"MLP lacks a linear {name}")
         # 三个 W 完全独立：不共享线路实例、光路参数或 EMA。
-        self.gate = ConditionedLowRankLinear(old_mlp.gate_proj, rank, z_dim, kappa, layer_index * 11 + 1)
-        self.up = ConditionedLowRankLinear(old_mlp.up_proj, rank, z_dim, kappa, layer_index * 11 + 2)
-        self.down = ConditionedLowRankLinear(old_mlp.down_proj, 2 * rank, z_dim, kappa, layer_index * 11 + 3)
+        self.gate = ConditionedLowRankLinear(old_mlp.gate_proj, rank, z_dim, kappa, layer_index * 11 + 1, gate_scale)
+        self.up = ConditionedLowRankLinear(old_mlp.up_proj, rank, z_dim, kappa, layer_index * 11 + 2, gate_scale)
+        self.down = ConditionedLowRankLinear(old_mlp.down_proj, 2 * rank, z_dim, kappa, layer_index * 11 + 3, gate_scale)
         self.gate_provider = provider_factory()
         self.up_provider = provider_factory()
         self.down_provider = provider_factory()
@@ -116,7 +134,15 @@ def freeze_non_mlp_modules(model: nn.Module) -> None:
         parameter.requires_grad = False
 
 
-def replace_final_mlps(model: nn.Module, provider_factory: Callable[[], PhotonicFeatureProvider], rank: int, z_dim: int, kappa: float, target_layers: tuple[int, ...]) -> list[PhotonicLowRankMLP]:
+def replace_final_mlps(
+    model: nn.Module,
+    provider_factory: Callable[[], PhotonicFeatureProvider],
+    rank: int,
+    z_dim: int,
+    kappa: float,
+    target_layers: tuple[int, ...],
+    gate_scale: float = 0.1,
+) -> list[PhotonicLowRankMLP]:
     """完整删除并替换 ``target_layers`` 指定的 MLP。"""
     layers = find_decoder_layers(model)
     if not target_layers:
@@ -129,13 +155,25 @@ def replace_final_mlps(model: nn.Module, provider_factory: Callable[[], Photonic
     replacements: list[PhotonicLowRankMLP] = []
     for index in target_layers:
         # 每层维护独立的线路实例与 EMA；避免层间的特征统计相互污染。
-        replacement = PhotonicLowRankMLP(layers[index].mlp, provider_factory, rank, z_dim, kappa, index)
+        replacement = PhotonicLowRankMLP(
+            layers[index].mlp, provider_factory, rank, z_dim, kappa, index, gate_scale
+        )
         layers[index].mlp = replacement
         replacements.append(replacement)
     return replacements
 
 
-def make_compressed_student(teacher: nn.Module, provider_factory: Callable[[], PhotonicFeatureProvider], rank: int, z_dim: int, kappa: float, target_layers: tuple[int, ...]) -> tuple[nn.Module, list[PhotonicLowRankMLP]]:
+def make_compressed_student(
+    teacher: nn.Module,
+    provider_factory: Callable[[], PhotonicFeatureProvider],
+    rank: int,
+    z_dim: int,
+    kappa: float,
+    target_layers: tuple[int, ...],
+    gate_scale: float = 0.1,
+) -> tuple[nn.Module, list[PhotonicLowRankMLP]]:
     """复制冻结教师，并在副本中删除对应 MLP。"""
     student = deepcopy(teacher)
-    return student, replace_final_mlps(student, provider_factory, rank, z_dim, kappa, target_layers)
+    return student, replace_final_mlps(
+        student, provider_factory, rank, z_dim, kappa, target_layers, gate_scale
+    )

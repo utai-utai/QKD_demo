@@ -1,4 +1,4 @@
-"""从 outputs/runs 中选择训练日志，并绘制指定的指标曲线。"""
+"""从 outputs/runs_old 中选择训练日志，并绘制指定的指标曲线。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_RUNS_ROOT = _PROJECT_ROOT / "outputs" / "runs"
+_RUNS_ROOT = _PROJECT_ROOT / "outputs" / "runs_old"
 _ANALYSIS_ROOT = _PROJECT_ROOT / "outputs" / "analysis"
 _CACHE_DIR = Path(tempfile.gettempdir()) / "qkd-matplotlib"
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -34,7 +34,7 @@ def plot_training_logs(
     """绘制同一 Stage 的指定运行与指标，并返回保存至 analysis 的图片路径。"""
     selections = _expand_selectors(run_selectors)
     if not selections:
-        raise ValueError("至少指定一个 --runs 运行选择器")
+        raise ValueError("至少指定一个 --runs_old 运行选择器")
     if not metrics:
         raise ValueError("至少指定一个 --metrics 指标")
 
@@ -130,7 +130,7 @@ def _plot_multiple_runs(
 
 def _normalize_selector(selector: str) -> str:
     if Path(selector).name != selector:
-        raise ValueError("--runs 只接受 outputs/runs 下的运行名，不接受文件路径")
+        raise ValueError("--runs_old 只接受 outputs/runs_old 下的运行名，不接受文件路径")
     match = re.fullmatch(r"layer(\d+)(.*)", selector)
     return f"layer-{match.group(1)}{match.group(2)}" if match else selector
 
@@ -158,14 +158,14 @@ def _resolve_run(selector: str) -> Path:
     normalized = _normalize_selector(selector)
     candidates = [
         path
-        for stage in ("stage1", "stage2")
+        for stage in ("stage1_old", "stage2")
         # 目录格式为 ``layer-<index>-...``。必须保留 index 后的连字符
         # 边界，否则 ``layer-1`` 会错误匹配 layer-10 到 layer-19。
         for path in (_RUNS_ROOT / stage).glob(f"{normalized}-*")
         if path.is_dir() and (path / "training_log.csv").is_file()
     ]
     if not candidates:
-        raise FileNotFoundError(f"未找到 outputs/runs 下匹配 {selector!r} 的 training_log.csv")
+        raise FileNotFoundError(f"未找到 outputs/runs_old 下匹配 {selector!r} 的 training_log.csv")
     return max(candidates, key=lambda path: path.name)
 
 
@@ -228,9 +228,9 @@ def _validate_log_values(values: list[float], label: str, log_y: bool) -> None:
 
 
 def arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="可视化 outputs/runs 中同一 Stage 的训练日志")
+    parser = argparse.ArgumentParser(description="可视化 outputs/runs_old 中同一 Stage 的训练日志")
     parser.add_argument(
-        "--runs",
+        "--runs_old",
         nargs="+",
         required=True,
         metavar="RUN",

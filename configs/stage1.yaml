@@ -1,5 +1,5 @@
 experiment:
-  output_dir: outputs/runs/stage1/layer-21-r64-{timestamp}
+  output_dir: outputs/runs/stage1_old/layer-21-r64-{timestamp}
   seed: 42
 
 data:
@@ -24,12 +24,12 @@ photonic:
   ema_decay: 0.9
 
 optimization:
-  steps: 100
+  steps: 10
   early_stop_loss: null  # 设为数值时，当前训练 loss <= 此值即提前结束；null 表示关闭
   adam_learning_rate: 2.0e-4
-  spsa_every: 200
-  spsa_perturbation: 0.05
-  spsa_learning_rate: 0.01
+#  spsa_every: 200
+#  spsa_perturbation: 0.05
+#  spsa_learning_rate: 0.01
 
 validation:
   every: 200
