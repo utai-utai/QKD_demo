@@ -17,7 +17,7 @@ import torch
 from torch import nn
 
 from qkd.photonic.checkpoint import checkpoint_metadata, save_compressed_modules
-from qkd.photonic.circuit import circuit_layout
+from qkd.photonic.circuit import clements_layout
 from qkd.photonic.model import PhotonicLowRankMLP, find_decoder_layers
 
 STAGE1_LOG_FIELDS = [
@@ -28,6 +28,17 @@ STAGE1_LOG_FIELDS = [
     "up_loss",
     "down_loss",
     "output_loss",
+    "auxiliary_loss",
+    "unscaled_loss",
+    "gate_c_grad_norm",
+    "gate_theta_grad_norm",
+    "gate_phi_grad_norm",
+    "up_c_grad_norm",
+    "up_theta_grad_norm",
+    "up_phi_grad_norm",
+    "down_c_grad_norm",
+    "down_theta_grad_norm",
+    "down_phi_grad_norm",
     "gate_mae",
     "gate_nmse",
     "gate_cos",
@@ -49,6 +60,10 @@ STAGE1_LOG_FIELDS = [
     "y_student_mean",
     "y_teacher_mean",
     "validation_loss",
+    "validation_output_loss",
+    "validation_gate_loss",
+    "validation_up_loss",
+    "validation_down_loss",
     "validation_y_nmse",
     "is_best",
     "spsa_applied",
@@ -58,11 +73,13 @@ STAGE1_LOG_FIELDS = [
 
 def stage1_photonic_log_fields(n_modes: int, n_layers: int) -> list[str]:
     """为三个独立光路生成逐参数 CSV 列名。"""
-    _, n_theta, n_phi = circuit_layout(n_modes, n_layers)
+    if n_layers != n_modes:
+        raise ValueError("Clements 网格要求 photonic.layers 等于 photonic.modes")
+    _, n_mzi = clements_layout(n_modes)
     fields = list(STAGE1_LOG_FIELDS)
     for projection in ("gate", "up", "down"):
-        fields.extend(f"{projection}_theta_{index:02d}" for index in range(n_theta))
-        fields.extend(f"{projection}_phi_{index:02d}" for index in range(n_phi))
+        fields.extend(f"{projection}_theta_{index:03d}" for index in range(n_mzi))
+        fields.extend(f"{projection}_phi_{index:03d}" for index in range(n_mzi))
     return fields
 STAGE2_LOG_FIELDS = [
     "step",

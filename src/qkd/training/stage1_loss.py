@@ -16,6 +16,8 @@ def stage_one_loss(
     teacher_up: Tensor,
     teacher_output: Tensor,
     attention_mask: Tensor,
+    auxiliary_weight: float = 0.0,
+    loss_scale: float = 1.0,
 ) -> dict[str, Tensor]:
     """计算第一阶段局部重建损失及诊断所需的张量。"""
     mask = attention_mask.bool()
@@ -23,12 +25,20 @@ def stage_one_loss(
     up_loss = relative_mse_cosine(student_up, teacher_up, mask)
     output_loss = relative_mse_cosine(student_output, teacher_output, mask)
     down_loss = relative_mse_cosine(projected_teacher_value, teacher_output, mask)
-    return {  # 阶段一只优化最终 MLP 输出；gate/up/down 的单独误差仅用于监测。
-        "loss": output_loss,
+    if auxiliary_weight < 0 or loss_scale <= 0:
+        raise ValueError("auxiliary_weight must be non-negative and loss_scale must be positive")
+    # 辅助投影项使 gate/up/down 获得直接监督；0 时完全复现旧的 output-only 目标。
+    auxiliary_loss = gate_loss + up_loss + down_loss
+    unscaled_loss = output_loss + auxiliary_weight * auxiliary_loss
+    loss = loss_scale * unscaled_loss
+    return {
+        "loss": loss,
         "gate_loss": gate_loss,
         "up_loss": up_loss,
         "output_loss": output_loss,
         "down_loss": down_loss,
+        "auxiliary_loss": auxiliary_loss,
+        "unscaled_loss": unscaled_loss,
         "gate": student_gate,
         "up": student_up,
         "down": projected_teacher_value,

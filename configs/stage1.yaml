@@ -15,11 +15,12 @@ compression:
   rank: 64
   z_dim: 16
   kappa: 1.0
+  gate_scale: 0.5  # g = 1 + gate_scale * tanh(Cz)
 
 photonic:
   provider: deepquantum
-  modes: 8
-  layers: 4
+  modes: 16
+  layers: 16
   shots: null
   ema_decay: 0.9
 
@@ -27,6 +28,8 @@ optimization:
   steps: 10
   early_stop_loss: null  # 设为数值时，当前训练 loss <= 此值即提前结束；null 表示关闭
   adam_learning_rate: 2.0e-4
+  auxiliary_loss_weight: 0.0  # L = output + weight * (gate + up + down); 0 保持旧目标
+  loss_scale: 1.0  # 只缩放反传总目标；Adam 下通常不改变实质训练行为
 #  spsa_every: 200
 #  spsa_perturbation: 0.05
 #  spsa_learning_rate: 0.01

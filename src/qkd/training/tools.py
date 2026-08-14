@@ -28,10 +28,14 @@ class StageOneReference(AbstractContextManager["StageOneReference"]):
         teacher: torch.nn.Module,
         teacher_mlp: torch.nn.Module,
         student_mlp: PhotonicLowRankMLP,
+        auxiliary_weight: float = 0.0,
+        loss_scale: float = 1.0,
     ) -> None:
         self.teacher = teacher
         self.teacher_mlp = teacher_mlp
         self.student_mlp = student_mlp
+        self.auxiliary_weight = auxiliary_weight
+        self.loss_scale = loss_scale
         self.values: tuple[torch.Tensor, torch.Tensor] | None = None
         self._hook: Any = None
 
@@ -93,6 +97,8 @@ class StageOneReference(AbstractContextManager["StageOneReference"]):
             teacher_up,
             teacher_output,
             batch["attention_mask"],
+            self.auxiliary_weight,
+            self.loss_scale,
         )
 
     def diagnostics(
@@ -114,7 +120,7 @@ class StageOneReference(AbstractContextManager["StageOneReference"]):
         """在完整验证集上计算 token 加权局部重建损失与诊断。"""
         was_training = student.training
         student.eval()
-        loss_sum, token_count, totals = 0.0, 0.0, {}
+        loss_sum, token_count, totals, term_sums = 0.0, 0.0, {}, {}
         try:
             progress = tqdm(loader, desc="Stage 1 validation", unit="batch", leave=False)
             for batch in progress:
@@ -124,12 +130,16 @@ class StageOneReference(AbstractContextManager["StageOneReference"]):
                 valid = metrics.pop("valid_tokens")
                 loss_sum += terms["loss"].float().item() * valid
                 token_count += valid
+                for name in ("output_loss", "gate_loss", "up_loss", "down_loss"):
+                    term_sums[name] = term_sums.get(name, 0.0) + terms[name].float().item() * valid
                 for name, value in metrics.items():
                     totals[name] = totals.get(name, 0.0) + value * valid
                 progress.set_postfix(loss=f"{loss_sum / token_count:.4f}")
         finally:
             student.train(was_training)
-        return loss_sum / token_count, {name: value / token_count for name, value in totals.items()}
+        metrics = {name: value / token_count for name, value in totals.items()}
+        metrics.update({name: value / token_count for name, value in term_sums.items()})
+        return loss_sum / token_count, metrics
 
     @torch.no_grad()
     def spsa_objective(self, batch: dict[str, torch.Tensor], student: torch.nn.Module) -> torch.Tensor:

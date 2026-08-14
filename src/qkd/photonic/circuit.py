@@ -1,4 +1,4 @@
-"""DeepQuantum 后端使用的可配置分层线性光学电路。"""
+"""16-mode single-photon path encoding and Clements interferometer."""
 
 from __future__ import annotations
 
@@ -6,51 +6,74 @@ import torch
 from torch import Tensor
 
 
-def circuit_layout(n_modes: int, n_layers: int) -> tuple[tuple[tuple[int, int], ...], int, int]:
-    """推导交错相邻 BS→全 mode PS 电路的连线与参数数目。"""
+def clements_layout(n_modes: int) -> tuple[tuple[tuple[int, int], ...], int]:
+    """Return the 16-layer alternating Clements mesh connectivity.
+
+    For 16 modes this is 8 even layers with 8 MZIs and 8 odd layers with 7
+    MZIs: 120 MZIs total.  A universal U(16) mesh also has 16 output phases.
+    """
     if n_modes < 2 or n_modes % 2:
-        raise ValueError("photonic.modes 必须是大于等于 2 的偶数")
-    if n_layers < 1:
-        raise ValueError("photonic.layers 必须大于等于 1")
+        raise ValueError("photonic.modes must be an even integer >= 2")
     even_pairs = tuple((mode, mode + 1) for mode in range(0, n_modes, 2))
     odd_pairs = tuple((mode, mode + 1) for mode in range(1, n_modes - 1, 2))
-    pairs = even_pairs + odd_pairs
-    return pairs, n_layers * len(pairs), n_layers * n_modes
+    pairs = tuple(pair for layer in range(n_modes) for pair in (even_pairs if layer % 2 == 0 else odd_pairs))
+    return pairs, len(pairs)
 
 
-def layered_photon_numbers(
-    encoded: Tensor, theta: Tensor, phi: Tensor, n_modes: int, n_layers: int
-) -> Tensor:
-    """返回可微分层 BS→PS 高斯光路的各 mode 平均光子数。"""
-    pairs, n_theta, n_phi = circuit_layout(n_modes, n_layers)
-    if encoded.shape[-1] != 2 * n_modes:
-        raise ValueError(f"期望 encoded[..., {2 * n_modes}]，实际为 {tuple(encoded.shape)}")
-    if theta.numel() != n_theta or phi.numel() != n_phi:
-        raise ValueError(
-            f"{n_layers} 层 {n_modes} mode 线路需要 theta={n_theta}、phi={n_phi}，"
-            f"实际为 {theta.numel()}、{phi.numel()}"
-        )
+def clements_parameter_counts(n_modes: int) -> tuple[int, int, int]:
+    """Return number of MZIs, MZI parameters, and output PS parameters."""
+    _, n_mzi = clements_layout(n_modes)
+    return n_mzi, 2 * n_mzi, n_modes
 
+
+def uniform_single_photon_state(n_modes: int):
+    """Return the uniform path state for DeepQuantum drawing/inspection only."""
     import deepquantum as dq
 
-    values = encoded.reshape(-1, 2 * n_modes).float()
-    circuit = dq.QumodeCircuit(nmode=n_modes, init_state="vac", backend="gaussian")
-    theta_index = 0
-    for layer in range(n_layers):
-        for wire_a, wire_b in pairs:
-            # 每个 BS 仅训练混合角 theta；内部相位固定为 0。
-            circuit.bs(wires=[wire_a, wire_b], inputs=[theta[theta_index], 0.0])
-            theta_index += 1
-        for mode in range(n_modes):
-            circuit.ps(wires=mode, inputs=phi[layer * n_modes + mode])
-    circuit.to(values.device)
+    amplitude = 1 / n_modes**0.5
+    return dq.FockState(
+        state=[(amplitude, [int(mode == index) for mode in range(n_modes)]) for index in range(n_modes)],
+        basis=False,
+    )
 
-    batch_size = values.shape[0]
-    covariance = torch.eye(2 * n_modes, dtype=values.dtype, device=values.device).expand(batch_size, -1, -1)
-    mean = values.new_zeros(batch_size, 2 * n_modes, 1)
-    # xxpp 排列：前 n_modes 是 x 位移，后 n_modes 是 p 位移（输入相位）。
-    mean[:, :n_modes, 0] = torch.tanh(values[:, :n_modes])
-    mean[:, n_modes:, 0] = torch.tanh(values[:, n_modes:])
-    circuit(state=[covariance, mean])
-    photon_numbers, _ = circuit.photon_number_mean_var(wires=list(range(n_modes)))
-    return photon_numbers.reshape(*encoded.shape[:-1], n_modes)
+
+def clements_single_photon_probabilities(
+    encoded: Tensor, theta: Tensor, phi: Tensor, output_phase: Tensor, n_modes: int
+) -> Tensor:
+    """Exact Fock evolution in the single-photon path subspace.
+
+    The full Fock tensor has ``2**n_modes`` entries even though this circuit
+    always contains exactly one photon.  The physically reachable Fock sector
+    is only ``{|1_0>, ..., |1_(N-1)>}``, so tracking its N complex amplitudes
+    is mathematically exact and makes 16-mode training practical.  The MZI
+    convention is identical to DeepQuantum's ``mzi(..., phi_first=True)``.
+    """
+    pairs, n_mzi = clements_layout(n_modes)
+    if encoded.shape[-1] != n_modes:
+        raise ValueError(f"Clements phase encoding expects encoded[..., {n_modes}], got {tuple(encoded.shape)}")
+    if theta.numel() != n_mzi or phi.numel() != n_mzi or output_phase.numel() != n_modes:
+        raise ValueError(
+            f"{n_modes}-mode Clements requires theta/phi={n_mzi} each and output_phase={n_modes}; got "
+            f"{theta.numel()}, {phi.numel()}, {output_phase.numel()}"
+        )
+
+    values = encoded.reshape(-1, n_modes).float()
+    # |psi_in> = 1/sqrt(N) sum_i exp(i*pi*tanh(e_i)) |1_i>.
+    amplitudes = torch.exp(1j * torch.tanh(values).to(torch.complex64) * torch.pi) / n_modes**0.5
+    for index, (wire_a, wire_b) in enumerate(pairs):
+        # DeepQuantum MZI(phi_first=True):
+        # i exp(i theta/2) [[exp(i phi) sin(theta/2), cos(theta/2)],
+        #                    [exp(i phi) cos(theta/2), -sin(theta/2)]].
+        angle, phase = theta[index].float(), phi[index].float()
+        scale = 1j * torch.exp(0.5j * angle)
+        sine, cosine = torch.sin(angle / 2), torch.cos(angle / 2)
+        phase_factor = torch.exp(1j * phase)
+        values_by_mode = list(amplitudes.unbind(dim=-1))
+        source_a, source_b = values_by_mode[wire_a], values_by_mode[wire_b]
+        values_by_mode[wire_a] = scale * (phase_factor * sine * source_a + cosine * source_b)
+        values_by_mode[wire_b] = scale * (phase_factor * cosine * source_a - sine * source_b)
+        amplitudes = torch.stack(values_by_mode, dim=-1)
+    # End phases are retained in the hardware drawing but cancel from |b_i|^2.
+    del output_phase
+    probabilities = amplitudes.abs().square()
+    return probabilities.reshape(*encoded.shape[:-1], n_modes)

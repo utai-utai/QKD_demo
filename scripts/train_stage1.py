@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from qkd.modeling import load_causal_lm, load_tokenizer
 from qkd.photonic.model import find_decoder_layers, make_compressed_student
-from qkd.training.artifacts import TrainingArtifacts, best_probe_payload, stage1_photonic_log_fields
+from qkd.training.artifacts import STAGE1_LOG_FIELDS, TrainingArtifacts, best_probe_payload
 from qkd.training.spsa import SPSA
 from qkd.training.tools import StageOneReference, apply_overrides, load_config, make_loader, next_batch, provider_factory, section, training_device
 
@@ -18,7 +18,25 @@ def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="阶段一：单层光子条件化低秩 MLP 重建")
     parser.add_argument("--config", required=True, help="阶段一 YAML 配置文件")
     parser.add_argument("--set", action="append", default=[], metavar="键路径=值", help="临时覆盖 YAML；可重复，例如 'model.target_layers=[22]'。")
+    parser.add_argument("--freeze-photonic", action="store_true", help="固定光路 theta/phi，只训练 C（C-only 消融）")
     return parser.parse_args()
+
+
+def stage_one_gradient_norms(replacement) -> dict[str, float]:
+    """在 optimizer.step 前记录各投影 C/theta/phi 的 L2 梯度范数。"""
+    def norm(parameter: torch.Tensor) -> float:
+        return 0.0 if parameter.grad is None else parameter.grad.detach().float().norm().item()
+
+    values: dict[str, float] = {}
+    for name, projection, provider in (
+        ("gate", replacement.gate, replacement.gate_provider),
+        ("up", replacement.up, replacement.up_provider),
+        ("down", replacement.down, replacement.down_provider),
+    ):
+        values[f"{name}_c_grad_norm"] = norm(projection.C)
+        values[f"{name}_theta_grad_norm"] = norm(provider.theta)
+        values[f"{name}_phi_grad_norm"] = norm(provider.phi)
+    return values
 
 
 def main() -> None:
@@ -40,7 +58,7 @@ def main() -> None:
     device = training_device()
     teacher_name = str(model["teacher"])
     n_modes, n_layers = int(photonic["modes"]), int(photonic["layers"])
-    artifacts = TrainingArtifacts.create(config, "stage1_old", device, stage1_photonic_log_fields(n_modes, n_layers))
+    artifacts = TrainingArtifacts.create(config, "stage1_old", device, STAGE1_LOG_FIELDS)
 
     # 2. 数据、教师模型与待训练的单层学生 MLP
     tokenizer = load_tokenizer(teacher_name)
@@ -55,17 +73,22 @@ def main() -> None:
     rank = int(compression["rank"])
     z_dim = int(compression["z_dim"])
     kappa = float(compression["kappa"])
+    gate_scale = float(compression.get("gate_scale", 0.5))
     student, replacements = make_compressed_student(
         teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers),
         rank, z_dim, kappa, target_layers,
+        gate_scale=gate_scale,
     )
     replacement = replacements[0]
     replacement.shots = photonic.get("shots")
     student.to(device).train()
-    optimizer = torch.optim.Adam(
-        (*replacement.adam_parameters(), *replacement.photonic_parameters()),
-        lr=float(optimization["adam_learning_rate"]),
-    )
+    trainable = list(replacement.adam_parameters())
+    if not args.freeze_photonic:
+        trainable.extend(replacement.photonic_parameters())
+    else:
+        for parameter in replacement.photonic_parameters():
+            parameter.requires_grad_(False)
+    optimizer = torch.optim.Adam(trainable, lr=float(optimization["adam_learning_rate"]))
     # spsa = SPSA(
     #     perturbation=float(optimization["spsa_perturbation"]),
     #     learning_rate=float(optimization["spsa_learning_rate"]),
@@ -80,7 +103,13 @@ def main() -> None:
     final_loss: float | None = None
 
     # 3. 局部重建损失、验证与最佳 probe
-    with StageOneReference(teacher, teacher_layers[target].mlp, replacement) as reference:
+    with StageOneReference(
+        teacher,
+        teacher_layers[target].mlp,
+        replacement,
+        auxiliary_weight=float(optimization.get("auxiliary_loss_weight", 0.0)),
+        loss_scale=float(optimization.get("loss_scale", 1.0)),
+    ) as reference:
 
         @torch.no_grad()
         def save_best_probe(step: int, metric_name: str, metric_value: float | None) -> None:
@@ -102,6 +131,7 @@ def main() -> None:
             batch = {key: value.to(device) for key, value in batch.items()}
             details = reference.terms(batch)
             details["loss"].backward()
+            gradient_norms = stage_one_gradient_norms(replacement)
             optimizer.step()
             optimizer.zero_grad()
             final_loss = details["loss"].detach().float().item()
@@ -114,13 +144,19 @@ def main() -> None:
                 "up_loss": details["up_loss"].detach().float().item(),
                 "down_loss": details["down_loss"].detach().float().item(),
                 "output_loss": details["output_loss"].detach().float().item(),
+                "auxiliary_loss": details["auxiliary_loss"].detach().float().item(),
+                "unscaled_loss": details["unscaled_loss"].detach().float().item(),
+                **gradient_norms,
                 **{name: value for name, value in diagnostics.items() if name != "valid_tokens"},
                 "validation_loss": "",
+                "validation_output_loss": "",
+                "validation_gate_loss": "",
+                "validation_up_loss": "",
+                "validation_down_loss": "",
                 "validation_y_nmse": "",
                 "is_best": False,
                 "spsa_applied": False,
                 "early_stopped": False,
-                **replacement.photonic_parameter_values(),
             }
 
             if early_stop_loss is not None and final_loss <= float(early_stop_loss):
@@ -135,6 +171,10 @@ def main() -> None:
             if int(validation_settings["every"]) and step % int(validation_settings["every"]) == 0:
                 validation_loss, metrics = reference.validate(validation_loader, student, device)
                 row["validation_loss"] = validation_loss
+                row["validation_output_loss"] = metrics["output_loss"]
+                row["validation_gate_loss"] = metrics["gate_loss"]
+                row["validation_up_loss"] = metrics["up_loss"]
+                row["validation_down_loss"] = metrics["down_loss"]
                 row["validation_y_nmse"] = metrics["y_nmse"]
                 postfix["val_loss"] = f"{validation_loss:.4f}"
                 if validation_loss < best_validation_loss:

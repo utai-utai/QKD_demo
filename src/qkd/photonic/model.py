@@ -50,7 +50,7 @@ class ConditionedLowRankLinear(nn.Module):
         z_dim: int,
         kappa: float,
         seed: int,
-        gate_scale: float = 0.1,
+        gate_scale: float = 0.5,
     ) -> None:
         super().__init__()
         if rank < z_dim:
@@ -86,7 +86,7 @@ class PhotonicLowRankMLP(nn.Module):
         z_dim: int,
         kappa: float,
         layer_index: int,
-        gate_scale: float = 0.1,
+        gate_scale: float = 0.5,
     ) -> None:
         super().__init__()
         for name in ("gate_proj", "up_proj", "down_proj"):
@@ -141,7 +141,7 @@ def replace_final_mlps(
     z_dim: int,
     kappa: float,
     target_layers: tuple[int, ...],
-    gate_scale: float = 0.1,
+    gate_scale: float = 0.5,
 ) -> list[PhotonicLowRankMLP]:
     """完整删除并替换 ``target_layers`` 指定的 MLP。"""
     layers = find_decoder_layers(model)
@@ -170,7 +170,7 @@ def make_compressed_student(
     z_dim: int,
     kappa: float,
     target_layers: tuple[int, ...],
-    gate_scale: float = 0.1,
+    gate_scale: float = 0.5,
 ) -> tuple[nn.Module, list[PhotonicLowRankMLP]]:
     """复制冻结教师，并在副本中删除对应 MLP。"""
     student = deepcopy(teacher)

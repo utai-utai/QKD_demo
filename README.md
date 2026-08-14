@@ -4,7 +4,7 @@
 
 ## 📌 项目简介
 
-本项目以 `Qwen/Qwen3.5-0.8B-Base` 为冻结基座模型（Teacher），将其指定 Transformer Decoder 层的 SwiGLU MLP 替换为基于**连续变量（CV）高斯环形光子电路条件化门控**的低秩 MLP 模块。
+本项目以 Qwen 基座模型（Teacher）为冻结教师，将指定 Transformer Decoder 层的 SwiGLU MLP 替换为基于**单光子路径编码 Clements 干涉仪条件化门控**的低秩 MLP 模块。
 
 通过将 **截断 SVD 低秩分解** 与 **光子量子电路的非线性演化** 结合，在大幅压缩模型参数的同时，利用蒸馏技术保留大语言模型的语义表达与推理能力。
 
@@ -15,14 +15,14 @@
 
 一个标准的 SwiGLU MLP 包含 **Gate** (`gate_proj`)、**Up** (`up_proj`) 和 **Down** (`down_proj`) 三个线性投影通道。每个投影通道均由教师权重的 rank-$r$ 截断 SVD 初始化，并融合光子电路演化：
 
-$$\begin{aligned} t &= B \cdot x & \text{(1. 截断 SVD 低秩基底映射，}P/B\text{ 冻结)} \\ e &= \kappa \cdot \tanh(R \cdot t) & \text{(2. 特征压缩并映射至光子电路输入空间，} R \text{ 为正交投影)} \\ z &= Q_{\theta,\phi}(e) & \text{(3. 可微四层八模 BS→PS 电路/Mock)} \\ g &= 1 + 0.1 \cdot \tanh(C \cdot z) & \text{(4. 训练 }C/b\text{ 生成条件化增益)} \\ \text{output}(x) &= P \cdot (g \odot t) & \text{(5. 门控调制与低秩特征重构)} \end{aligned}$$
+$$\begin{aligned} t &= B \cdot x & \text{(1. 截断 SVD 低秩基底映射，}P/B\text{ 冻结)} \\ e &= \kappa \cdot \tanh(R \cdot t) & \text{(2. 特征压缩并映射至光子电路输入空间，} R \text{ 为正交投影)} \\ z &= Q_{\theta,\phi}(e) & \text{(3. 可微 16-mode 单光子 Clements 网格/Mock)} \\ g &= 1 + 0.5 \cdot \tanh(C \cdot z) & \text{(4. 训练 }C\text{ 生成条件化增益)} \\ \text{output}(x) &= P \cdot (g \odot t) & \text{(5. 门控调制与低秩特征重构)} \end{aligned}$$
 
 ### ⚛️ 光子特征提供器 ($Q_\theta$)
 
 * **`mock`**：模拟量接口，用于 CPU 快速开发与逻辑验证。
-* **`deepquantum`**：基于 DeepQuantum 驱动的可微分层连续变量高斯电路。每层为相邻交错 BS 后接每个 mode 的 PS；配对和参数数量由 `photonic.modes`、`photonic.layers` 自动推导。默认四层八模时，共训练 28 个 $\theta$ 与 32 个 $\phi$。
+* **`deepquantum`**：基于 DeepQuantum 驱动的可微分单光子 Fock 电路。一个光子先制备为 16 路均匀路径叠加态；16 维特征分别写入 16 个输入相移器。随后通过 16 层 Clements 网格（120 个 MZI，每个含 $\theta,\phi$）干涉，读出 16 个端口概率。网格有 240 个可训练 MZI 参数；探测器前的 16 个输出 PS 为完整物理布局保留，但不影响概率读出、因而不训练。
 
-> 🛡️ **隔离设计原则**：每层的 Gate、Up、Down 各自拥有**完全独立**的低秩矩阵 ($P, B, C, b, R$)、Provider 实例、光子电路调用、物理控制参数 $\theta$ 以及 EMA 统计状态；不同 Transformer 层之间互不共享。
+> 🛡️ **隔离设计原则**：每层的 Gate、Up、Down 各自拥有**完全独立**的低秩矩阵 ($P, B, C, R$)、Provider 实例、光子电路调用与物理控制参数 $(\theta,\phi)$；不同 Transformer 层之间互不共享。
 
 ---
 
@@ -47,7 +47,7 @@ QKD_demo/
     ├── ⚛️ photonic/                    # 光子低秩模块与硬件仿真层
     │   ├── model.py                  # 低秩 MLP 架构、SVD 初始化与层替换
     │   ├── provider.py               # Mock / DeepQuantum 特征提供器与 EMA 维护
-    │   ├── circuit.py                # 八模 DeepQuantum 连续变量高斯电路
+    │   ├── circuit.py                # 16-mode 单光子 Clements Fock 电路
     │   └── checkpoint.py             # 增量模块保存、恢复与 Stage 1 多层 Checkpoint 缝合
     │
     └── 🏋️ training/                  # 损失函数与双轨优化器
@@ -135,9 +135,9 @@ python scripts/train_stage2.py --config configs/stage2.yaml
 | --- | --- | --- | --- |
 | **模型与目标** | `model.target_layers` | `[21]` / `[21, 22]` | 指定被替换为光子 Low-Rank MLP 的 Layer 索引列表 |
 | **低秩压缩** | `compression.rank` | `64` | SVD 截断低秩维度 $r$（决定模型参数压缩率） |
-| **物理空间** | `compression.z_dim` | `16` | 光子电路特征空间维度（对应 8 光子数 + 8 环状相关量） |
-| **光子提供器** | `photonic.provider` | `deepquantum` | 选择 `deepquantum` 高斯模拟器或 `mock` CPU 快速测试器 |
-| **光路规模** | `photonic.modes` / `photonic.layers` | `8` / `4` | 偶数 mode 数与 BS→PS 层数；要求 `z_dim = 2 × modes` |
+| **物理空间** | `compression.z_dim` | `16` | 光子输入相移与 16 端口概率读出的维度 |
+| **光子提供器** | `photonic.provider` | `deepquantum` | 选择 `deepquantum` Fock 模拟器或 `mock` CPU 快速测试器 |
+| **光路规模** | `photonic.modes` / `photonic.layers` | `16` / `16` | 16 路单光子 Clements 网格；要求 `z_dim = modes` 且 `layers = modes` |
 | **量子测量** | `photonic.shots` | `None` / `1024` | 测量 Shot 数（`None` 为理论解析期望，整数则注入量子采样噪声） |
 | **SPSA（保留）** | `optimization.spsa_*` | `perturbation=0.01` | 为后续非可微硬件后端保留；当前 DeepQuantum 可微模拟不调用它 |
 | **早停** | `optimization.early_stop_loss` | `null` / `0.1` | 当前训练总 loss 小于等于阈值时结束训练并保存；`null` 表示关闭 |
