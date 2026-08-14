@@ -114,6 +114,12 @@ class PhotonicLowRankMLP(nn.Module):
         for provider in (self.gate_provider, self.up_provider, self.down_provider):
             yield from provider.parameters()
 
+    def factor_parameters(self) -> Iterator[nn.Parameter]:
+        """返回冻结 SVD 低秩因子 P/B，供可选的低学习率微调。"""
+        for projection in (self.gate, self.up, self.down):
+            yield projection.P
+            yield projection.B
+
     @torch.no_grad()
     def photonic_parameter_values(self) -> dict[str, float]:
         """返回更新后的三套光路 theta/phi，供逐 step CSV 记录。"""

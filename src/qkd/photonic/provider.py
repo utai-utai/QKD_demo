@@ -88,3 +88,27 @@ class DeepQuantumCVFeatureProvider(MockPhotonicFeatureProvider):
             encoded, self.theta, self.phi, self.output_phase, self.n_modes
         )
         return self._postprocess(probability, self.output_phase.mean(), shots, device)
+
+
+class ClassicalFCFeatureProvider(PhotonicFeatureProvider):
+    """Parameter-matched classical baseline: 16 -> 7 -> 16 GELU network.
+
+    For 16 modes it has 16*7 + 7*16 + 16 = 240 trainable parameters,
+    exactly matching one Clements provider's 120 theta + 120 phi parameters.
+    """
+
+    def __init__(self, z_dim: int = 16, ema_decay: float | None = 0.9, n_modes: int = 16, n_layers: int = 16) -> None:
+        super().__init__()
+        del ema_decay, n_layers
+        if z_dim != 16 or n_modes != 16:
+            raise ValueError("参数匹配经典基线当前固定为 16 维输入/输出")
+        self.z_dim = z_dim
+        self.fc_in = nn.Linear(16, 7, bias=False)
+        self.fc_out = nn.Linear(7, 16, bias=True)
+
+    def sample(self, encoded: Tensor, shots: int | None, device: torch.device) -> Tensor:
+        if shots is not None:
+            raise ValueError("classical provider does not support photon shots")
+        if encoded.shape[-1] != self.z_dim:
+            raise ValueError(f"期望 encoded[..., {self.z_dim}]，实际为 {tuple(encoded.shape)}")
+        return self.fc_out(torch.nn.functional.gelu(self.fc_in(encoded))).to(device)

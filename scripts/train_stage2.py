@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from functools import partial
 
 import torch
@@ -22,6 +23,26 @@ def arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def parameter_norm(parameters) -> float:
+    values = [parameter.grad.detach().float().norm().square() for parameter in parameters if parameter.grad is not None]
+    return torch.stack(values).sum().sqrt().item() if values else 0.0
+
+
+def stage_two_gradient_norms(replacements) -> dict[str, float]:
+    c = [parameter for replacement in replacements for parameter in replacement.adam_parameters()]
+    factors = [parameter for replacement in replacements for parameter in replacement.factor_parameters()]
+    providers = [parameter for replacement in replacements for parameter in replacement.photonic_parameters()]
+    theta = [getattr(provider, "theta") for replacement in replacements for provider in (replacement.gate_provider, replacement.up_provider, replacement.down_provider) if hasattr(provider, "theta")]
+    phi = [getattr(provider, "phi") for replacement in replacements for provider in (replacement.gate_provider, replacement.up_provider, replacement.down_provider) if hasattr(provider, "phi")]
+    return {
+        "c_grad_norm": parameter_norm(c),
+        "pb_grad_norm": parameter_norm(factors),
+        "feature_grad_norm": parameter_norm(providers),
+        "theta_grad_norm": parameter_norm(theta),
+        "phi_grad_norm": parameter_norm(phi),
+    }
+
+
 def main() -> None:
     args = arguments()
 
@@ -30,7 +51,7 @@ def main() -> None:
     experiment, data = section(config, "experiment"), section(config, "data")
     model, compression = section(config, "model"), section(config, "compression")
     photonic, initialization = section(config, "photonic"), section(config, "initialization")
-    optimization = section(config, "optimization")
+    optimization, validation_settings = section(config, "optimization"), section(config, "validation")
     target_layers = tuple(int(index) for index in model["target_layers"])
     checkpoint_references = initialization.get("stage1_checkpoints")
     if not isinstance(checkpoint_references, list) or not checkpoint_references:
@@ -54,16 +75,36 @@ def main() -> None:
     n_modes, n_layers = int(photonic["modes"]), int(photonic["layers"])
     student, replacements = make_compressed_student(
         teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers),
-        rank, z_dim, kappa, target_layers,
+        rank, z_dim, kappa, target_layers, gate_scale=float(compression.get("gate_scale", 0.5)),
     )
     for replacement in replacements:
         replacement.shots = photonic.get("shots")
     load_stage_one_checkpoints(checkpoint_dirs, replacements, rank, z_dim, kappa, target_layers, str(photonic["provider"]))
     student.to(device).train()
-    optimizer = torch.optim.Adam(
-        (parameter for replacement in replacements for parameter in (*replacement.adam_parameters(), *replacement.photonic_parameters())),
-        lr=float(optimization["adam_learning_rate"]),
-    )
+    c_parameters = [parameter for replacement in replacements for parameter in replacement.adam_parameters()]
+    photonic_parameters = [parameter for replacement in replacements for parameter in replacement.photonic_parameters()]
+    factor_parameters = [parameter for replacement in replacements for parameter in replacement.factor_parameters()]
+    parameter_groups = [
+        {"params": c_parameters, "lr": float(optimization["adam_learning_rate"])},
+        {"params": photonic_parameters, "lr": float(optimization.get("photonic_learning_rate", optimization["adam_learning_rate"]))},
+    ]
+    if bool(compression.get("train_factors", False)):
+        for parameter in factor_parameters:
+            parameter.requires_grad_(True)
+        parameter_groups.append({"params": factor_parameters, "lr": float(optimization.get("factor_learning_rate", 5e-5))})
+    optimizer = torch.optim.Adam(parameter_groups)
+    schedule_name = str(optimization.get("lr_schedule", "constant")).lower()
+    min_lr_scale = float(optimization.get("min_lr_scale", 0.1))
+    if schedule_name == "cosine":
+        total_steps = int(optimization["steps"])
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer,
+            lr_lambda=lambda step: min_lr_scale + (1 - min_lr_scale) * 0.5 * (1 + math.cos(math.pi * min(step, total_steps) / total_steps)),
+        )
+    elif schedule_name == "constant":
+        scheduler = None
+    else:
+        raise ValueError("optimization.lr_schedule 仅支持 constant 或 cosine")
     # spsa = SPSA(
     #     perturbation=float(optimization["spsa_perturbation"]),
     #     learning_rate=float(optimization["spsa_learning_rate"]),
@@ -73,6 +114,9 @@ def main() -> None:
     if early_stop_loss is not None and float(early_stop_loss) < 0:
         raise ValueError("optimization.early_stop_loss 必须为非负数或 null")
     stopped_early = False
+    validation_every = int(validation_settings["every"])
+    if validation_every < 1:
+        raise ValueError("validation.every 必须为正整数")
     best_loss = float("inf")
     best_step: int | None = None
     final_loss: float | None = None
@@ -86,11 +130,11 @@ def main() -> None:
             with capture_mlp_outputs(teacher, student, target_layers) as (teacher_y, student_y):
                 teacher(input_ids=probe_batch["input_ids"], attention_mask=probe_batch["attention_mask"])
                 student(input_ids=probe_batch["input_ids"], attention_mask=probe_batch["attention_mask"])
-            artifacts.save_best_probe(best_probe_payload("stage2", step, "train_loss", loss, target_layers, probe_batch, teacher_y, student_y))
+            artifacts.save_best_probe(best_probe_payload("stage2", step, "validation_loss", loss, target_layers, probe_batch, teacher_y, student_y))
         finally:
             student.train()
 
-    # 4. 端到端蒸馏：CE + Top-K KD；P/B 冻结，C 与光路参数通过 autograd 优化。
+    # 4. 端到端蒸馏：CE + Top-K KD；可选解冻 P/B，所有参数通过 autograd 优化。
     layer_label = ",".join(str(index) for index in target_layers)
     progress = tqdm(range(1, int(optimization["steps"]) + 1), desc=f"Stage 2 · layers {layer_label}", unit="step")
     for step in progress:
@@ -101,7 +145,10 @@ def main() -> None:
         student_logits = student(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits  # 跑全网 Student 获得学生 logits
         terms = stage_two_loss(student_logits, teacher_logits, batch["labels"], temperature=float(optimization["temperature"]), top_k=int(optimization["top_k"]))
         terms["loss"].backward()
+        gradient_norms = stage_two_gradient_norms(replacements)
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
         optimizer.zero_grad()
         final_loss = terms["loss"].detach().float().item()
         row = {
@@ -110,17 +157,29 @@ def main() -> None:
             "loss": final_loss,
             "ce": terms["ce"].detach().float().item(),
             "kd": terms["kd"].detach().float().item(),
+            **gradient_norms,
+            "validation_loss": "",
+            "validation_ce": "",
+            "validation_kd": "",
             "is_best": False,
             "spsa_applied": False,
             "early_stopped": False,
         }
 
-        if final_loss < best_loss:
-            best_loss = final_loss
-            best_step = step
-            row["is_best"] = True
-            artifacts.save_checkpoint(replacements, rank, z_dim, kappa, target_layers, teacher_name, str(photonic["provider"]))
-            save_best_probe(step, final_loss)
+        if step % validation_every == 0:
+            validation = stage_two_validation_objective(
+                student, teacher, validation_loader, device,
+                float(optimization["temperature"]), int(optimization["top_k"]),
+            )
+            row["validation_loss"] = validation["loss"]
+            row["validation_ce"] = validation["ce"]
+            row["validation_kd"] = validation["kd"]
+            if validation["loss"] < best_loss:
+                best_loss = validation["loss"]
+                best_step = step
+                row["is_best"] = True
+                artifacts.save_checkpoint(replacements, rank, z_dim, kappa, target_layers, teacher_name, str(photonic["provider"]))
+                save_best_probe(step, validation["loss"])
 
         if early_stop_loss is not None and final_loss <= float(early_stop_loss):
             stopped_early = True
@@ -131,9 +190,9 @@ def main() -> None:
 
         # 保留 SPSA 模块与配置以便后续非可微硬件后端；当前可微模拟不调用它。
         artifacts.log_step(row)
-        progress.set_postfix(loss=f"{final_loss:.4f}", ce=f"{row['ce']:.4f}", kd=f"{row['kd']:.4f}")
+        progress.set_postfix(loss=f"{final_loss:.4f}", val=row["validation_loss"] or "-", ce=f"{row['ce']:.4f}")
 
-    artifacts.finish(status="early_stopped" if stopped_early else "completed", final_step=step, final_loss=final_loss, best_step=best_step, best_train_loss=best_loss, early_stop_loss=early_stop_loss)
+    artifacts.finish(status="early_stopped" if stopped_early else "completed", final_step=step, final_loss=final_loss, best_step=best_step, best_validation_loss=best_loss, early_stop_loss=early_stop_loss)
 
 
 if __name__ == "__main__":

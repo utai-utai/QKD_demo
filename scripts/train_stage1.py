@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from functools import partial
 from typing import Any
 
@@ -27,6 +28,10 @@ def stage_one_gradient_norms(replacement) -> dict[str, float]:
     def norm(parameter: torch.Tensor) -> float:
         return 0.0 if parameter.grad is None else parameter.grad.detach().float().norm().item()
 
+    def provider_norm(provider: torch.nn.Module) -> float:
+        values = [norm(parameter) ** 2 for parameter in provider.parameters()]
+        return sum(values) ** 0.5
+
     values: dict[str, float] = {}
     for name, projection, provider in (
         ("gate", replacement.gate, replacement.gate_provider),
@@ -34,8 +39,11 @@ def stage_one_gradient_norms(replacement) -> dict[str, float]:
         ("down", replacement.down, replacement.down_provider),
     ):
         values[f"{name}_c_grad_norm"] = norm(projection.C)
-        values[f"{name}_theta_grad_norm"] = norm(provider.theta)
-        values[f"{name}_phi_grad_norm"] = norm(provider.phi)
+        values[f"{name}_p_grad_norm"] = norm(projection.P)
+        values[f"{name}_b_grad_norm"] = norm(projection.B)
+        values[f"{name}_theta_grad_norm"] = norm(provider.theta) if hasattr(provider, "theta") else 0.0
+        values[f"{name}_phi_grad_norm"] = norm(provider.phi) if hasattr(provider, "phi") else 0.0
+        values[f"{name}_feature_grad_norm"] = provider_norm(provider)
     return values
 
 
@@ -82,13 +90,47 @@ def main() -> None:
     replacement = replacements[0]
     replacement.shots = photonic.get("shots")
     student.to(device).train()
-    trainable = list(replacement.adam_parameters())
+    c_parameters = list(replacement.adam_parameters())
+    photonic_parameters = list(replacement.photonic_parameters())
+    factor_parameters = list(replacement.factor_parameters())
+    parameter_groups: list[dict[str, object]] = [
+        {"params": c_parameters, "lr": float(optimization["adam_learning_rate"])}
+    ]
     if not args.freeze_photonic:
-        trainable.extend(replacement.photonic_parameters())
+        parameter_groups.append(
+            {
+                "params": photonic_parameters,
+                "lr": float(optimization.get("photonic_learning_rate", optimization["adam_learning_rate"])),
+            }
+        )
     else:
-        for parameter in replacement.photonic_parameters():
+        for parameter in photonic_parameters:
             parameter.requires_grad_(False)
-    optimizer = torch.optim.Adam(trainable, lr=float(optimization["adam_learning_rate"]))
+    if bool(compression.get("train_factors", False)):
+        for parameter in factor_parameters:
+            parameter.requires_grad_(True)
+        parameter_groups.append(
+            {
+                "params": factor_parameters,
+                "lr": float(optimization.get("factor_learning_rate", 5e-5)),
+            }
+        )
+    optimizer = torch.optim.Adam(parameter_groups)
+    schedule_name = str(optimization.get("lr_schedule", "constant")).lower()
+    min_lr_scale = float(optimization.get("min_lr_scale", 0.1))
+    if not 0 < min_lr_scale <= 1:
+        raise ValueError("optimization.min_lr_scale 必须在 (0, 1] 内")
+    if schedule_name == "cosine":
+        total_steps = int(optimization["steps"])
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer,
+            lr_lambda=lambda step: min_lr_scale
+            + (1 - min_lr_scale) * 0.5 * (1 + math.cos(math.pi * min(step, total_steps) / total_steps)),
+        )
+    elif schedule_name == "constant":
+        scheduler = None
+    else:
+        raise ValueError("optimization.lr_schedule 仅支持 constant 或 cosine")
     # spsa = SPSA(
     #     perturbation=float(optimization["spsa_perturbation"]),
     #     learning_rate=float(optimization["spsa_learning_rate"]),
@@ -108,6 +150,7 @@ def main() -> None:
         teacher_layers[target].mlp,
         replacement,
         auxiliary_weight=float(optimization.get("auxiliary_loss_weight", 0.0)),
+        output_weight=float(optimization.get("output_loss_weight", 1.0)),
         loss_scale=float(optimization.get("loss_scale", 1.0)),
     ) as reference:
 
@@ -133,6 +176,8 @@ def main() -> None:
             details["loss"].backward()
             gradient_norms = stage_one_gradient_norms(replacement)
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             optimizer.zero_grad()
             final_loss = details["loss"].detach().float().item()
             diagnostics = reference.diagnostics(details, batch["attention_mask"])

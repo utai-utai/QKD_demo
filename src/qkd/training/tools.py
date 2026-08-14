@@ -14,7 +14,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 
 from qkd.data import TokenizedChatDataset, collate_tokenized
-from qkd.photonic import DeepQuantumCVFeatureProvider, MockPhotonicFeatureProvider
+from qkd.photonic import ClassicalFCFeatureProvider, DeepQuantumCVFeatureProvider, MockPhotonicFeatureProvider
 from qkd.photonic.model import PhotonicLowRankMLP
 from qkd.training.stage1_loss import local_diagnostics, stage_one_loss
 from qkd.training.stage2_loss import stage_two_loss
@@ -29,12 +29,14 @@ class StageOneReference(AbstractContextManager["StageOneReference"]):
         teacher_mlp: torch.nn.Module,
         student_mlp: PhotonicLowRankMLP,
         auxiliary_weight: float = 0.0,
+        output_weight: float = 1.0,
         loss_scale: float = 1.0,
     ) -> None:
         self.teacher = teacher
         self.teacher_mlp = teacher_mlp
         self.student_mlp = student_mlp
         self.auxiliary_weight = auxiliary_weight
+        self.output_weight = output_weight
         self.loss_scale = loss_scale
         self.values: tuple[torch.Tensor, torch.Tensor] | None = None
         self._hook: Any = None
@@ -98,6 +100,7 @@ class StageOneReference(AbstractContextManager["StageOneReference"]):
             teacher_output,
             batch["attention_mask"],
             self.auxiliary_weight,
+            self.output_weight,
             self.loss_scale,
         )
 
@@ -153,6 +156,7 @@ class StageOneReference(AbstractContextManager["StageOneReference"]):
 
 
 @torch.no_grad()
+@torch.no_grad()
 def stage_two_validation_objective(
     student: torch.nn.Module,
     teacher: torch.nn.Module,
@@ -160,13 +164,15 @@ def stage_two_validation_objective(
     device: torch.device,
     temperature: float,
     top_k: int,
-) -> torch.Tensor:
-    """计算完整验证集的 Stage 2 蒸馏目标，供 SPSA 调用。"""
+) -> dict[str, float]:
+    """计算完整验证集的 Stage 2 蒸馏指标。"""
     was_training = student.training
     student.eval()
     try:
-        values = []
-        for batch in loader:
+        totals = {"loss": 0.0, "ce": 0.0, "kd": 0.0}
+        batches = 0
+        progress = tqdm(loader, desc="Stage 2 validation", unit="batch", leave=False)
+        for batch in progress:
             batch = {key: value.to(device) for key, value in batch.items()}
             teacher_logits = teacher(
                 input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
@@ -174,12 +180,14 @@ def stage_two_validation_objective(
             student_logits = student(
                 input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
             ).logits
-            values.append(
-                stage_two_loss(student_logits, teacher_logits, batch["labels"], temperature, top_k)[
-                    "loss"
-                ]
-            )
-        return torch.stack(values).mean()
+            terms = stage_two_loss(student_logits, teacher_logits, batch["labels"], temperature, top_k)
+            for name in totals:
+                totals[name] += terms[name].float().item()
+            batches += 1
+            progress.set_postfix(loss=f"{totals['loss'] / batches:.4f}")
+        if batches == 0:
+            raise ValueError("Stage 2 validation loader is empty")
+        return {name: value / batches for name, value in totals.items()}
     finally:
         student.train(was_training)
 
@@ -252,6 +260,10 @@ def provider_factory(name: str, z_dim: int, ema_decay: float | None, n_modes: in
         )
     if name == "deepquantum":
         return lambda: DeepQuantumCVFeatureProvider(
+            z_dim=z_dim, ema_decay=ema_decay, n_modes=n_modes, n_layers=n_layers
+        )
+    if name == "classical":
+        return lambda: ClassicalFCFeatureProvider(
             z_dim=z_dim, ema_decay=ema_decay, n_modes=n_modes, n_layers=n_layers
         )
     raise ValueError(f"不支持的光子 provider：{name}")
