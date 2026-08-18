@@ -294,8 +294,17 @@ class TrainingArtifacts:
         if isinstance(experiment, dict):
             experiment.pop("output_dir", None)
 
-        for section_name in ("model", "compression"):
-            config.pop(section_name, None)
+        config.pop("model", None)
+
+        # rank/z_dim/kappa/target_layers 已由 checkpoint 唯一描述；但门控与初始化
+        # 会影响训练动力学，必须保留在 run.json 以复现实验。
+        compression = config.get("compression")
+        if isinstance(compression, dict):
+            config["compression"] = {
+                key: compression[key]
+                for key in ("gate_scale", "c_init_std", "train_pb")
+                if key in compression
+            }
 
         photonic = config.get("photonic")
         if isinstance(photonic, dict):

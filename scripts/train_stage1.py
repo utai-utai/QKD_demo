@@ -20,7 +20,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="阶段一 YAML 配置文件")
     parser.add_argument("--set", action="append", default=[], metavar="键路径=值", help="临时覆盖 YAML；可重复，例如 'model.target_layers=[22]'。")
     parser.add_argument("--freeze-photonic", action="store_true", help="固定光路 theta/phi，只训练 C（C-only 消融）")
-    parser.add_argument("--factors-only", action="store_true", help="仅训练 P/B，固定 C 与 provider，并严格使用 g=1")
+    parser.add_argument("--pb-only", action="store_true", help="仅训练 P/B，固定 C 与 provider，并严格使用 g=1")
     return parser.parse_args()
 
 
@@ -84,42 +84,43 @@ def main() -> None:
     kappa = float(compression["kappa"])
     gate_scale = float(compression.get("gate_scale", 0.5))
     student, replacements = make_compressed_student(
-        teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers),
+        teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers, float(photonic.get("theta_init_std", 0.1)), float(photonic.get("phi_init_std", 0.1))),
         rank, z_dim, kappa, target_layers,
         gate_scale=gate_scale,
+        c_init_std=float(compression.get("c_init_std", 0.1)),
     )
     replacement = replacements[0]
     replacement.shots = photonic.get("shots")
     student.to(device).train()
-    c_parameters = list(replacement.adam_parameters())
+    c_parameters = list(replacement.c_parameters())
     photonic_parameters = list(replacement.photonic_parameters())
-    factor_parameters = list(replacement.factor_parameters())
-    if args.factors_only and not bool(compression.get("train_factors", False)):
-        raise ValueError("--factors-only 需要 compression.train_factors=true")
+    pb_parameters = list(replacement.pb_parameters())
+    if args.pb_only and not bool(compression.get("train_pb", False)):
+        raise ValueError("--pb-only 需要 compression.train_pb=true")
     parameter_groups: list[dict[str, object]] = []
-    if args.factors_only:
+    if args.pb_only:
         for parameter in c_parameters + photonic_parameters:
             parameter.requires_grad_(False)
         replacement.disable_conditioning()
     else:
-        parameter_groups.append({"params": c_parameters, "lr": float(optimization["adam_learning_rate"])})
-    if not args.freeze_photonic and not args.factors_only:
+        parameter_groups.append({"params": c_parameters, "lr": float(optimization["c_learning_rate"])})
+    if not args.freeze_photonic and not args.pb_only:
         parameter_groups.append(
             {
                 "params": photonic_parameters,
-                "lr": float(optimization.get("photonic_learning_rate", optimization["adam_learning_rate"])),
+                "lr": float(optimization["photonic_learning_rate"]),
             }
         )
     else:
         for parameter in photonic_parameters:
             parameter.requires_grad_(False)
-    if bool(compression.get("train_factors", False)):
-        for parameter in factor_parameters:
+    if bool(compression.get("train_pb", False)):
+        for parameter in pb_parameters:
             parameter.requires_grad_(True)
         parameter_groups.append(
             {
-                "params": factor_parameters,
-                "lr": float(optimization.get("factor_learning_rate", 5e-5)),
+                "params": pb_parameters,
+                "lr": float(optimization["pb_learning_rate"]),
             }
         )
     if not parameter_groups:

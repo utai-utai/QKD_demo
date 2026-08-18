@@ -20,7 +20,7 @@ def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="阶段二：端到端光子条件化知识蒸馏")
     parser.add_argument("--config", required=True, help="阶段二 YAML 配置文件")
     parser.add_argument("--set", action="append", default=[], metavar="键路径=值", help="临时覆盖 YAML；可重复使用。")
-    parser.add_argument("--factors-only", action="store_true", help="仅训练 P/B，固定 C 与 provider，并严格使用 g=1")
+    parser.add_argument("--pb-only", action="store_true", help="仅训练 P/B，固定 C 与 provider，并严格使用 g=1")
     return parser.parse_args()
 
 
@@ -30,14 +30,14 @@ def parameter_norm(parameters) -> float:
 
 
 def stage_two_gradient_norms(replacements) -> dict[str, float]:
-    c = [parameter for replacement in replacements for parameter in replacement.adam_parameters()]
-    factors = [parameter for replacement in replacements for parameter in replacement.factor_parameters()]
+    c = [parameter for replacement in replacements for parameter in replacement.c_parameters()]
+    pb = [parameter for replacement in replacements for parameter in replacement.pb_parameters()]
     providers = [parameter for replacement in replacements for parameter in replacement.photonic_parameters()]
     theta = [getattr(provider, "theta") for replacement in replacements for provider in (replacement.gate_provider, replacement.up_provider, replacement.down_provider) if hasattr(provider, "theta")]
     phi = [getattr(provider, "phi") for replacement in replacements for provider in (replacement.gate_provider, replacement.up_provider, replacement.down_provider) if hasattr(provider, "phi")]
     return {
         "c_grad_norm": parameter_norm(c),
-        "pb_grad_norm": parameter_norm(factors),
+        "pb_grad_norm": parameter_norm(pb),
         "feature_grad_norm": parameter_norm(providers),
         "theta_grad_norm": parameter_norm(theta),
         "phi_grad_norm": parameter_norm(phi),
@@ -75,33 +75,34 @@ def main() -> None:
     kappa = float(compression["kappa"])
     n_modes, n_layers = int(photonic["modes"]), int(photonic["layers"])
     student, replacements = make_compressed_student(
-        teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers),
+        teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers, float(photonic.get("theta_init_std", 0.1)), float(photonic.get("phi_init_std", 0.1))),
         rank, z_dim, kappa, target_layers, gate_scale=float(compression.get("gate_scale", 0.5)),
+        c_init_std=float(compression.get("c_init_std", 0.1)),
     )
     for replacement in replacements:
         replacement.shots = photonic.get("shots")
     load_stage_one_checkpoints(checkpoint_dirs, replacements, rank, z_dim, kappa, target_layers, str(photonic["provider"]))
     student.to(device).train()
-    c_parameters = [parameter for replacement in replacements for parameter in replacement.adam_parameters()]
+    c_parameters = [parameter for replacement in replacements for parameter in replacement.c_parameters()]
     photonic_parameters = [parameter for replacement in replacements for parameter in replacement.photonic_parameters()]
-    factor_parameters = [parameter for replacement in replacements for parameter in replacement.factor_parameters()]
-    if args.factors_only and not bool(compression.get("train_factors", False)):
-        raise ValueError("--factors-only 需要 compression.train_factors=true")
+    pb_parameters = [parameter for replacement in replacements for parameter in replacement.pb_parameters()]
+    if args.pb_only and not bool(compression.get("train_pb", False)):
+        raise ValueError("--pb-only 需要 compression.train_pb=true")
     parameter_groups = []
-    if args.factors_only:
+    if args.pb_only:
         for parameter in c_parameters + photonic_parameters:
             parameter.requires_grad_(False)
         for replacement in replacements:
             replacement.disable_conditioning()
     else:
         parameter_groups.extend([
-            {"params": c_parameters, "lr": float(optimization["adam_learning_rate"])},
-            {"params": photonic_parameters, "lr": float(optimization.get("photonic_learning_rate", optimization["adam_learning_rate"]))},
+            {"params": c_parameters, "lr": float(optimization["c_learning_rate"])},
+            {"params": photonic_parameters, "lr": float(optimization["photonic_learning_rate"])},
         ])
-    if bool(compression.get("train_factors", False)):
-        for parameter in factor_parameters:
+    if bool(compression.get("train_pb", False)):
+        for parameter in pb_parameters:
             parameter.requires_grad_(True)
-        parameter_groups.append({"params": factor_parameters, "lr": float(optimization.get("factor_learning_rate", 5e-5))})
+        parameter_groups.append({"params": pb_parameters, "lr": float(optimization["pb_learning_rate"])})
     if not parameter_groups:
         raise ValueError("没有可训练参数；请启用 P/B 或 C/provider")
     optimizer = torch.optim.Adam(parameter_groups)

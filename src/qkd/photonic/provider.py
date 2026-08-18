@@ -18,7 +18,7 @@ class PhotonicFeatureProvider(nn.Module, ABC):
 
 class MockPhotonicFeatureProvider(PhotonicFeatureProvider):
     """用于 CPU 测试与早期实验的确定性可微分层光子替代器。"""
-    def __init__(self, z_dim: int = 16, ema_decay: float | None = 0.9, n_modes: int = 16, n_layers: int = 16) -> None:
+    def __init__(self, z_dim: int = 16, ema_decay: float | None = 0.9, n_modes: int = 16, n_layers: int = 16, theta_init_std: float = 0.1, phi_init_std: float = 0.1) -> None:
         super().__init__()
         if z_dim != n_modes:
             raise ValueError("Clements 相移编码要求 compression.z_dim 等于 photonic.modes")
@@ -34,8 +34,10 @@ class MockPhotonicFeatureProvider(PhotonicFeatureProvider):
         # 最后再接 N 个输出相移器。
         # 50:50 MZI 起点确保输入相位从第一步就能通过干涉改变探测概率；
         # theta=0 会使网格退化为路径置换，导致 phase encoding 的梯度消失。
-        self.theta = nn.Parameter(torch.full((n_mzi,), torch.pi / 4))
-        self.phi = nn.Parameter(torch.zeros(n_mzi))
+        if theta_init_std < 0 or phi_init_std < 0:
+            raise ValueError("theta_init_std 与 phi_init_std 必须非负")
+        self.theta = nn.Parameter(torch.full((n_mzi,), torch.pi / 4) + torch.randn(n_mzi) * theta_init_std)
+        self.phi = nn.Parameter(torch.randn(n_mzi) * phi_init_std)
         # 探测器前的末端 PS 属于完整 U(N) 网格的物理组成，但 photon-number
         # 概率对它不变（|exp(i alpha) b|^2 = |b|^2），因此将其保留为硬件布局
         # 参数而不交给优化器，避免无意义的零梯度参数。
@@ -79,8 +81,8 @@ class MockPhotonicFeatureProvider(PhotonicFeatureProvider):
 
 class DeepQuantumCVFeatureProvider(MockPhotonicFeatureProvider):
     """使用 DeepQuantum 单光子 Clements Fock 模拟器的可微分特征提供器。"""
-    def __init__(self, z_dim: int = 16, ema_decay: float | None = 0.9, n_modes: int = 16, n_layers: int = 16) -> None:
-        super().__init__(z_dim=z_dim, ema_decay=ema_decay, n_modes=n_modes, n_layers=n_layers)
+    def __init__(self, z_dim: int = 16, ema_decay: float | None = 0.9, n_modes: int = 16, n_layers: int = 16, theta_init_std: float = 0.1, phi_init_std: float = 0.1) -> None:
+        super().__init__(z_dim=z_dim, ema_decay=ema_decay, n_modes=n_modes, n_layers=n_layers, theta_init_std=theta_init_std, phi_init_std=phi_init_std)
         import deepquantum  # noqa: F401 -- 在训练开始时确认依赖可用。
 
     def sample(self, encoded: Tensor, shots: int | None, device: torch.device) -> Tensor:
@@ -97,9 +99,9 @@ class ClassicalFCFeatureProvider(PhotonicFeatureProvider):
     exactly matching one Clements provider's 120 theta + 120 phi parameters.
     """
 
-    def __init__(self, z_dim: int = 16, ema_decay: float | None = 0.9, n_modes: int = 16, n_layers: int = 16) -> None:
+    def __init__(self, z_dim: int = 16, ema_decay: float | None = 0.9, n_modes: int = 16, n_layers: int = 16, theta_init_std: float = 0.1, phi_init_std: float = 0.1) -> None:
         super().__init__()
-        del ema_decay, n_layers
+        del ema_decay, n_layers, theta_init_std, phi_init_std
         if z_dim != 16 or n_modes != 16:
             raise ValueError("参数匹配经典基线当前固定为 16 维输入/输出")
         self.z_dim = z_dim

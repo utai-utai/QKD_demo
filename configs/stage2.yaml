@@ -16,7 +16,8 @@ compression:
   z_dim: 16
   kappa: 1.0
   gate_scale: 1.0
-  train_factors: false
+  c_init_std: 0.1
+  train_pb: false
 
 photonic:
   provider: deepquantum
@@ -24,6 +25,8 @@ photonic:
   layers: 16
   shots: null
   ema_decay: 0.9
+  theta_init_std: 0.1
+  phi_init_std: 0.1
 
 initialization:
   stage1_checkpoints:
@@ -34,9 +37,9 @@ initialization:
 optimization:
   steps: 100
   early_stop_loss: null  # 设为数值时，当前训练 loss <= 此值即提前结束；null 表示关闭
-  adam_learning_rate: 1.0e-3
-  photonic_learning_rate: 1.0e-2
-  factor_learning_rate: 5.0e-5
+  c_learning_rate: 2.0e-4
+  photonic_learning_rate: 1.0e-3
+  pb_learning_rate: 5.0e-5
   lr_schedule: cosine
   min_lr_scale: 0.1
   spsa_every: 200
