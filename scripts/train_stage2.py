@@ -20,6 +20,7 @@ def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="阶段二：端到端光子条件化知识蒸馏")
     parser.add_argument("--config", required=True, help="阶段二 YAML 配置文件")
     parser.add_argument("--set", action="append", default=[], metavar="键路径=值", help="临时覆盖 YAML；可重复使用。")
+    parser.add_argument("--factors-only", action="store_true", help="仅训练 P/B，固定 C 与 provider，并严格使用 g=1")
     return parser.parse_args()
 
 
@@ -84,14 +85,25 @@ def main() -> None:
     c_parameters = [parameter for replacement in replacements for parameter in replacement.adam_parameters()]
     photonic_parameters = [parameter for replacement in replacements for parameter in replacement.photonic_parameters()]
     factor_parameters = [parameter for replacement in replacements for parameter in replacement.factor_parameters()]
-    parameter_groups = [
-        {"params": c_parameters, "lr": float(optimization["adam_learning_rate"])},
-        {"params": photonic_parameters, "lr": float(optimization.get("photonic_learning_rate", optimization["adam_learning_rate"]))},
-    ]
+    if args.factors_only and not bool(compression.get("train_factors", False)):
+        raise ValueError("--factors-only 需要 compression.train_factors=true")
+    parameter_groups = []
+    if args.factors_only:
+        for parameter in c_parameters + photonic_parameters:
+            parameter.requires_grad_(False)
+        for replacement in replacements:
+            replacement.disable_conditioning()
+    else:
+        parameter_groups.extend([
+            {"params": c_parameters, "lr": float(optimization["adam_learning_rate"])},
+            {"params": photonic_parameters, "lr": float(optimization.get("photonic_learning_rate", optimization["adam_learning_rate"]))},
+        ])
     if bool(compression.get("train_factors", False)):
         for parameter in factor_parameters:
             parameter.requires_grad_(True)
         parameter_groups.append({"params": factor_parameters, "lr": float(optimization.get("factor_learning_rate", 5e-5))})
+    if not parameter_groups:
+        raise ValueError("没有可训练参数；请启用 P/B 或 C/provider")
     optimizer = torch.optim.Adam(parameter_groups)
     schedule_name = str(optimization.get("lr_schedule", "constant")).lower()
     min_lr_scale = float(optimization.get("min_lr_scale", 0.1))

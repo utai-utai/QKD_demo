@@ -20,6 +20,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="阶段一 YAML 配置文件")
     parser.add_argument("--set", action="append", default=[], metavar="键路径=值", help="临时覆盖 YAML；可重复，例如 'model.target_layers=[22]'。")
     parser.add_argument("--freeze-photonic", action="store_true", help="固定光路 theta/phi，只训练 C（C-only 消融）")
+    parser.add_argument("--factors-only", action="store_true", help="仅训练 P/B，固定 C 与 provider，并严格使用 g=1")
     return parser.parse_args()
 
 
@@ -93,10 +94,16 @@ def main() -> None:
     c_parameters = list(replacement.adam_parameters())
     photonic_parameters = list(replacement.photonic_parameters())
     factor_parameters = list(replacement.factor_parameters())
-    parameter_groups: list[dict[str, object]] = [
-        {"params": c_parameters, "lr": float(optimization["adam_learning_rate"])}
-    ]
-    if not args.freeze_photonic:
+    if args.factors_only and not bool(compression.get("train_factors", False)):
+        raise ValueError("--factors-only 需要 compression.train_factors=true")
+    parameter_groups: list[dict[str, object]] = []
+    if args.factors_only:
+        for parameter in c_parameters + photonic_parameters:
+            parameter.requires_grad_(False)
+        replacement.disable_conditioning()
+    else:
+        parameter_groups.append({"params": c_parameters, "lr": float(optimization["adam_learning_rate"])})
+    if not args.freeze_photonic and not args.factors_only:
         parameter_groups.append(
             {
                 "params": photonic_parameters,
@@ -115,6 +122,8 @@ def main() -> None:
                 "lr": float(optimization.get("factor_learning_rate", 5e-5)),
             }
         )
+    if not parameter_groups:
+        raise ValueError("没有可训练参数；请启用 P/B 或 C/provider")
     optimizer = torch.optim.Adam(parameter_groups)
     schedule_name = str(optimization.get("lr_schedule", "constant")).lower()
     min_lr_scale = float(optimization.get("min_lr_scale", 0.1))
@@ -166,7 +175,7 @@ def main() -> None:
             finally:
                 student.train()
 
-        # 4. 训练循环：Adam 仅更新 C 与 DeepQuantum 可微光路参数；P/B 保持冻结。
+        # 4. 训练循环：默认更新 C/provider；PB-only 消融仅更新 P/B。
         iterator = iter(train_loader)
         progress = tqdm(range(1, int(optimization["steps"]) + 1), desc=f"Stage 1 · layer {target}", unit="step")
         for step in progress:

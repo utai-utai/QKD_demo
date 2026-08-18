@@ -111,4 +111,7 @@ class ClassicalFCFeatureProvider(PhotonicFeatureProvider):
             raise ValueError("classical provider does not support photon shots")
         if encoded.shape[-1] != self.z_dim:
             raise ValueError(f"期望 encoded[..., {self.z_dim}]，实际为 {tuple(encoded.shape)}")
-        return self.fc_out(torch.nn.functional.gelu(self.fc_in(encoded))).to(device)
+        # 4B 教师的 hidden states 通常是 bf16，而新建的经典基线权重保持 fp32；
+        # 在线性层内部统一 fp32，随后 ConditionedLowRankLinear 会转回其模型 dtype。
+        features = self.fc_out(torch.nn.functional.gelu(self.fc_in(encoded.to(self.fc_in.weight.dtype))))
+        return features.to(device)

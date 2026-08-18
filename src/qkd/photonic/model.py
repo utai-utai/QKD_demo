@@ -66,9 +66,13 @@ class ConditionedLowRankLinear(nn.Module):
         self.register_buffer("R", orthogonal[:z_dim].to(dtype=p.dtype, device=p.device))
         self.kappa = kappa
         self.gate_scale = gate_scale
+        # PB-only 消融时固定 C/线路且直接取 g=1；跳过无意义的特征线路计算。
+        self.conditioning_enabled = True
 
     def forward(self, x: Tensor, provider: PhotonicFeatureProvider, shots: int | None) -> Tensor:
         t = F.linear(x, self.B)
+        if not self.conditioning_enabled:
+            return F.linear(t, self.P)
         encoded = self.kappa * torch.tanh(F.linear(t, self.R))
         z = provider.sample(encoded, shots, x.device)
         z = z.to(device=t.device, dtype=self.C.dtype)
@@ -120,6 +124,11 @@ class PhotonicLowRankMLP(nn.Module):
             yield projection.P
             yield projection.B
 
+    def disable_conditioning(self) -> None:
+        """PB-only baseline: exactly use g=1 and do not execute the feature provider."""
+        for projection in (self.gate, self.up, self.down):
+            projection.conditioning_enabled = False
+
     @torch.no_grad()
     def photonic_parameter_values(self) -> dict[str, float]:
         """返回更新后的三套光路 theta/phi，供逐 step CSV 记录。"""
@@ -133,6 +142,39 @@ class PhotonicLowRankMLP(nn.Module):
                 parameter = getattr(provider, parameter_name).detach().float().cpu().reshape(-1)
                 values.update({f"{projection}_{parameter_name}_{index:02d}": value for index, value in enumerate(parameter.tolist())})
         return values
+
+
+class TruncatedSVDLinear(nn.Module):
+    """无条件化的截断 SVD 基线：``W ≈ P B``。
+
+    该模块没有门控、C 或特征提供器；它用于与同 rank 的条件化模型做公平的
+    纯低秩比较。down 投影的 rank 由调用者显式传入（本项目为 ``2 * rank``）。
+    """
+
+    def __init__(self, teacher_target: nn.Module | Tensor, rank: int) -> None:
+        super().__init__()
+        p, b = _svd_factors(teacher_target, rank)
+        self.register_buffer("P", p)
+        self.register_buffer("B", b)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return F.linear(F.linear(x, self.B), self.P)
+
+
+class TruncatedSVDMLP(nn.Module):
+    """Qwen SwiGLU MLP 的纯截断-SVD 基线。"""
+
+    def __init__(self, old_mlp: nn.Module, rank: int) -> None:
+        super().__init__()
+        for name in ("gate_proj", "up_proj", "down_proj"):
+            if not isinstance(getattr(old_mlp, name, None), nn.Linear):
+                raise TypeError(f"MLP lacks a linear {name}")
+        self.gate = TruncatedSVDLinear(old_mlp.gate_proj, rank)
+        self.up = TruncatedSVDLinear(old_mlp.up_proj, rank)
+        self.down = TruncatedSVDLinear(old_mlp.down_proj, 2 * rank)
+
+    def forward(self, hidden_states: Tensor) -> Tensor:
+        return self.down(F.silu(self.gate(hidden_states)) * self.up(hidden_states))
 
 
 def freeze_non_mlp_modules(model: nn.Module) -> None:
@@ -183,3 +225,19 @@ def make_compressed_student(
     return student, replace_final_mlps(
         student, provider_factory, rank, z_dim, kappa, target_layers, gate_scale
     )
+
+
+def make_truncated_svd_student(
+    teacher: nn.Module, rank: int, target_layers: tuple[int, ...]
+) -> nn.Module:
+    """复制教师并以纯 ``W≈PB`` 模块替换指定层 MLP，且不训练任何新参数。"""
+    student = deepcopy(teacher)
+    freeze_non_mlp_modules(student)
+    layers = find_decoder_layers(student)
+    if not target_layers or len(set(target_layers)) != len(target_layers):
+        raise ValueError("target_layers must be non-empty and contain no duplicates")
+    if any(index < 0 or index >= len(layers) for index in target_layers):
+        raise ValueError(f"invalid target layers for {len(layers)} decoder layers: {target_layers}")
+    for index in target_layers:
+        layers[index].mlp = TruncatedSVDMLP(layers[index].mlp, rank)
+    return student
