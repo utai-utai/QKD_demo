@@ -252,18 +252,18 @@ def training_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def provider_factory(name: str, z_dim: int, ema_decay: float | None, n_modes: int, n_layers: int, theta_init_std: float = 0.1, phi_init_std: float = 0.1):
+def provider_factory(name: str, z_dim: int, ema_decay: float | None, n_modes: int, n_layers: int, theta_init_std: float = 0.1, phi_init_std: float = 0.1, n_meshes: int = 1):
     """为每个 W 返回独立 provider 的构造器。"""
     if name == "mock":
         return lambda: MockPhotonicFeatureProvider(
-            z_dim=z_dim, ema_decay=ema_decay, n_modes=n_modes, n_layers=n_layers, theta_init_std=theta_init_std, phi_init_std=phi_init_std
+            z_dim=z_dim, ema_decay=ema_decay, n_modes=n_modes, n_layers=n_layers, n_meshes=n_meshes, theta_init_std=theta_init_std, phi_init_std=phi_init_std
         )
     if name == "deepquantum":
         return lambda: DeepQuantumCVFeatureProvider(
-            z_dim=z_dim, ema_decay=ema_decay, n_modes=n_modes, n_layers=n_layers, theta_init_std=theta_init_std, phi_init_std=phi_init_std
+            z_dim=z_dim, ema_decay=ema_decay, n_modes=n_modes, n_layers=n_layers, n_meshes=n_meshes, theta_init_std=theta_init_std, phi_init_std=phi_init_std
         )
     if name == "classical":
         return lambda: ClassicalFCFeatureProvider(
-            z_dim=z_dim, ema_decay=ema_decay, n_modes=n_modes, n_layers=n_layers, theta_init_std=theta_init_std, phi_init_std=phi_init_std
+            z_dim=z_dim, ema_decay=ema_decay, n_modes=n_modes, n_layers=n_layers, n_meshes=n_meshes, theta_init_std=theta_init_std, phi_init_std=phi_init_std
         )
     raise ValueError(f"不支持的光子 provider：{name}")

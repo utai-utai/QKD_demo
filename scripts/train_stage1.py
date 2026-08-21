@@ -21,6 +21,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--set", action="append", default=[], metavar="键路径=值", help="临时覆盖 YAML；可重复，例如 'model.target_layers=[22]'。")
     parser.add_argument("--freeze-photonic", action="store_true", help="固定光路 theta/phi，只训练 C（C-only 消融）")
     parser.add_argument("--pb-only", action="store_true", help="仅训练 P/B，固定 C 与 provider，并严格使用 g=1")
+    parser.add_argument("--validate-initial", action="store_true", help="在 step 0 验证并保存初始 SVD/条件化 checkpoint")
     return parser.parse_args()
 
 
@@ -84,7 +85,7 @@ def main() -> None:
     kappa = float(compression["kappa"])
     gate_scale = float(compression.get("gate_scale", 0.5))
     student, replacements = make_compressed_student(
-        teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers, float(photonic.get("theta_init_std", 0.1)), float(photonic.get("phi_init_std", 0.1))),
+        teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers, float(photonic.get("theta_init_std", 0.1)), float(photonic.get("phi_init_std", 0.1)), int(photonic.get("meshes", 1))),
         rank, z_dim, kappa, target_layers,
         gate_scale=gate_scale,
         c_init_std=float(compression.get("c_init_std", 0.1)),
@@ -175,6 +176,31 @@ def main() -> None:
                 artifacts.save_best_probe(best_probe_payload("stage1_old", step, metric_name, metric_value, target_layers, probe_batch, {target: teacher_y}, {target: details["output"]}))
             finally:
                 student.train()
+
+        if args.validate_initial:
+            # With C=0 and frozen P/B this is exactly the g=1 truncated-SVD
+            # baseline.  Recording it makes later conditioning improvements
+            # causal rather than inferred from separate runs.
+            initial_loss, initial_metrics = reference.validate(validation_loader, student, device)
+            best_validation_loss = initial_loss
+            best_step = 0
+            artifacts.save_checkpoint(replacements, rank, z_dim, kappa, target_layers, teacher_name, str(photonic["provider"]))
+            save_best_probe(0, "validation_loss", initial_loss)
+            initial_row = {field: "" for field in STAGE1_LOG_FIELDS}
+            initial_row.update({
+                "step": 0,
+                "elapsed_seconds": artifacts.elapsed_seconds,
+                "validation_loss": initial_loss,
+                "validation_output_loss": initial_metrics["output_loss"],
+                "validation_gate_loss": initial_metrics["gate_loss"],
+                "validation_up_loss": initial_metrics["up_loss"],
+                "validation_down_loss": initial_metrics["down_loss"],
+                "validation_y_nmse": initial_metrics["y_nmse"],
+                "is_best": True,
+                "spsa_applied": False,
+                "early_stopped": False,
+            })
+            artifacts.log_step(initial_row)
 
         # 4. 训练循环：默认更新 C/provider；PB-only 消融仅更新 P/B。
         iterator = iter(train_loader)

@@ -75,7 +75,7 @@ def main() -> None:
     kappa = float(compression["kappa"])
     n_modes, n_layers = int(photonic["modes"]), int(photonic["layers"])
     student, replacements = make_compressed_student(
-        teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers, float(photonic.get("theta_init_std", 0.1)), float(photonic.get("phi_init_std", 0.1))),
+        teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers, float(photonic.get("theta_init_std", 0.1)), float(photonic.get("phi_init_std", 0.1)), int(photonic.get("meshes", 1))),
         rank, z_dim, kappa, target_layers, gate_scale=float(compression.get("gate_scale", 0.5)),
         c_init_std=float(compression.get("c_init_std", 0.1)),
     )

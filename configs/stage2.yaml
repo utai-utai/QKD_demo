@@ -23,6 +23,7 @@ photonic:
   provider: deepquantum
   modes: 16
   layers: 16
+  meshes: 1  # 1=单 Clements；2=两个 16-layer Clements 网格串联
   shots: null
   ema_decay: 0.9
   theta_init_std: 0.1
