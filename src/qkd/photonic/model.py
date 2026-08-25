@@ -52,6 +52,8 @@ class ConditionedLowRankLinear(nn.Module):
         seed: int,
         gate_scale: float = 0.5,
         c_init_std: float = 0.1,
+        encoded_input_mode: str = "input_dependent",
+        fixed_encoded_std: float = 0.1,
     ) -> None:
         super().__init__()
         if rank < z_dim:
@@ -70,6 +72,15 @@ class ConditionedLowRankLinear(nn.Module):
         # 先生成 rank×rank 正交矩阵，再取前 z_dim 行，确保 R 始终为 [z_dim, rank]，即使 rank 大于 z_dim 也保持行正交。
         orthogonal, _ = torch.linalg.qr(torch.randn(rank, rank, generator=generator))
         self.register_buffer("R", orthogonal[:z_dim].to(dtype=p.dtype, device=p.device))
+        if encoded_input_mode not in {"input_dependent", "constant_zero", "constant_gaussian"}:
+            raise ValueError("encoded_input_mode 必须是 input_dependent、constant_zero 或 constant_gaussian")
+        if fixed_encoded_std < 0:
+            raise ValueError("fixed_encoded_std 必须非负")
+        self.encoded_input_mode = encoded_input_mode
+        # 常量输入消融：每个投影有一个由其固定 seed 生成的向量，但它对所有
+        # token 都相同。这样测试的是“是否依赖输入”，而不是每次前向重采样的噪声。
+        fixed_encoded = torch.zeros(z_dim) if encoded_input_mode == "constant_zero" else torch.randn(z_dim, generator=generator) * fixed_encoded_std
+        self.register_buffer("fixed_encoded", fixed_encoded.to(dtype=p.dtype, device=p.device))
         self.kappa = kappa
         self.gate_scale = gate_scale
         # PB-only 消融时固定 C/线路且直接取 g=1；跳过无意义的特征线路计算。
@@ -79,7 +90,10 @@ class ConditionedLowRankLinear(nn.Module):
         t = F.linear(x, self.B)
         if not self.conditioning_enabled:
             return F.linear(t, self.P)
-        encoded = self.kappa * torch.tanh(F.linear(t, self.R))
+        if self.encoded_input_mode == "input_dependent":
+            encoded = self.kappa * torch.tanh(F.linear(t, self.R))
+        else:
+            encoded = self.fixed_encoded.expand(*t.shape[:-1], self.fixed_encoded.shape[0])
         z = provider.sample(encoded, shots, x.device)
         z = z.to(device=t.device, dtype=self.C.dtype)
         gate = 1 + self.gate_scale * torch.tanh(F.linear(z, self.C))
@@ -98,15 +112,17 @@ class PhotonicLowRankMLP(nn.Module):
         layer_index: int,
         gate_scale: float = 0.5,
         c_init_std: float = 0.1,
+        encoded_input_mode: str = "input_dependent",
+        fixed_encoded_std: float = 0.1,
     ) -> None:
         super().__init__()
         for name in ("gate_proj", "up_proj", "down_proj"):
             if not isinstance(getattr(old_mlp, name, None), nn.Linear):
                 raise TypeError(f"MLP lacks a linear {name}")
         # 三个 W 完全独立：不共享线路实例、光路参数或 EMA。
-        self.gate = ConditionedLowRankLinear(old_mlp.gate_proj, rank, z_dim, kappa, layer_index * 11 + 1, gate_scale, c_init_std)
-        self.up = ConditionedLowRankLinear(old_mlp.up_proj, rank, z_dim, kappa, layer_index * 11 + 2, gate_scale, c_init_std)
-        self.down = ConditionedLowRankLinear(old_mlp.down_proj, 2 * rank, z_dim, kappa, layer_index * 11 + 3, gate_scale, c_init_std)
+        self.gate = ConditionedLowRankLinear(old_mlp.gate_proj, rank, z_dim, kappa, layer_index * 11 + 1, gate_scale, c_init_std, encoded_input_mode, fixed_encoded_std)
+        self.up = ConditionedLowRankLinear(old_mlp.up_proj, rank, z_dim, kappa, layer_index * 11 + 2, gate_scale, c_init_std, encoded_input_mode, fixed_encoded_std)
+        self.down = ConditionedLowRankLinear(old_mlp.down_proj, 2 * rank, z_dim, kappa, layer_index * 11 + 3, gate_scale, c_init_std, encoded_input_mode, fixed_encoded_std)
         self.gate_provider = provider_factory()
         self.up_provider = provider_factory()
         self.down_provider = provider_factory()
@@ -198,6 +214,8 @@ def replace_final_mlps(
     target_layers: tuple[int, ...],
     gate_scale: float = 0.5,
     c_init_std: float = 0.1,
+    encoded_input_mode: str = "input_dependent",
+    fixed_encoded_std: float = 0.1,
 ) -> list[PhotonicLowRankMLP]:
     """完整删除并替换 ``target_layers`` 指定的 MLP。"""
     layers = find_decoder_layers(model)
@@ -212,7 +230,8 @@ def replace_final_mlps(
     for index in target_layers:
         # 每层维护独立的线路实例与 EMA；避免层间的特征统计相互污染。
         replacement = PhotonicLowRankMLP(
-            layers[index].mlp, provider_factory, rank, z_dim, kappa, index, gate_scale, c_init_std
+            layers[index].mlp, provider_factory, rank, z_dim, kappa, index, gate_scale, c_init_std,
+            encoded_input_mode, fixed_encoded_std,
         )
         layers[index].mlp = replacement
         replacements.append(replacement)
@@ -228,11 +247,14 @@ def make_compressed_student(
     target_layers: tuple[int, ...],
     gate_scale: float = 0.5,
     c_init_std: float = 0.1,
+    encoded_input_mode: str = "input_dependent",
+    fixed_encoded_std: float = 0.1,
 ) -> tuple[nn.Module, list[PhotonicLowRankMLP]]:
     """复制冻结教师，并在副本中删除对应 MLP。"""
     student = deepcopy(teacher)
     return student, replace_final_mlps(
-        student, provider_factory, rank, z_dim, kappa, target_layers, gate_scale, c_init_std
+        student, provider_factory, rank, z_dim, kappa, target_layers, gate_scale, c_init_std,
+        encoded_input_mode, fixed_encoded_std,
     )
 
 

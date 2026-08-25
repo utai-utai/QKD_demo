@@ -25,8 +25,8 @@ class MockPhotonicFeatureProvider(PhotonicFeatureProvider):
         pairs, n_mzi = clements_layout(n_modes)
         if n_layers != n_modes:
             raise ValueError("Clements 网格固定为 photonic.layers == photonic.modes")
-        if n_meshes not in (1, 2):
-            raise ValueError("当前仅支持 1 或 2 个串联 Clements 网格")
+        if n_meshes not in (1, 2, 3):
+            raise ValueError("当前仅支持 1、2 或 3 个串联 Clements 网格")
         self.z_dim = z_dim
         self.n_modes = n_modes
         self.n_layers = n_layers
@@ -41,9 +41,8 @@ class MockPhotonicFeatureProvider(PhotonicFeatureProvider):
         n_mzi_total = n_meshes * n_mzi
         self.theta = nn.Parameter(torch.full((n_mzi_total,), torch.pi / 4) + torch.randn(n_mzi_total) * theta_init_std)
         self.phi = nn.Parameter(torch.randn(n_mzi_total) * phi_init_std)
-        # For two meshes, this is the first mesh's output PS and genuinely
-        # changes the second mesh's interference.  The final output PS remains
-        # a buffer because photon-number probabilities cannot observe it.
+        # 每个非末端网格的输出 PS 都位于下一网格之前，因此真实改变后续干涉。
+        # 末端 output PS 对 photon-number probabilities 不可观察，保留为 buffer。
         self.intermediate_phase = nn.Parameter(torch.randn(n_meshes - 1, n_modes) * phi_init_std)
         # 探测器前的末端 PS 属于完整 U(N) 网格的物理组成，但 photon-number
         # 概率对它不变（|exp(i alpha) b|^2 = |b|^2），因此将其保留为硬件布局

@@ -17,13 +17,15 @@ compression:
   kappa: 1.0
   gate_scale: 0.5  # g = 1 + gate_scale * tanh(Cz)
   c_init_std: 0.1  # C ~ N(0, c_init_std^2)，为量子线路提供明显的初始梯度
+  encoded_input_mode: input_dependent  # input_dependent、constant_zero 或 constant_gaussian
+  fixed_encoded_std: 0.1  # constant_gaussian 时固定 16 维量子输入的标准差
   train_pb: false  # true 时解冻低秩 P/B；正式微调建议使用远小于 C 的学习率
 
 photonic:
   provider: deepquantum
   modes: 16
   layers: 16
-  meshes: 1  # 1=单 Clements；2=两个 16-layer Clements 网格串联
+  meshes: 1  # 1/2/3 个 16-layer Clements 网格串联
   shots: null
   ema_decay: 0.9
   theta_init_std: 0.1  # theta = pi/4 + N(0, theta_init_std^2)

@@ -10,6 +10,31 @@ import torch
 from .model import PhotonicLowRankMLP
 
 
+_LEGACY_OPTIONAL_STATE_KEYS = {
+    "gate.fixed_encoded", "up.fixed_encoded", "down.fixed_encoded",
+    "gate_provider.intermediate_phase", "up_provider.intermediate_phase", "down_provider.intermediate_phase",
+}
+
+
+def _load_module_state(module: PhotonicLowRankMLP, state: dict[str, torch.Tensor], checkpoint_dir: str | Path, layer: int) -> None:
+    """Load weights while accepting only buffers introduced after old checkpoints.
+
+    ``fixed_encoded`` is unused by historic input-dependent checkpoints, and a
+    one-mesh checkpoint did not persist the empty ``intermediate_phase``
+    parameter.  All other missing or unexpected keys still indicate a real
+    incompatible checkpoint and remain fatal.
+    """
+    incompatible = module.load_state_dict(state, strict=False)
+    missing = set(incompatible.missing_keys)
+    unexpected = set(incompatible.unexpected_keys)
+    invalid_missing = missing - _LEGACY_OPTIONAL_STATE_KEYS
+    if invalid_missing or unexpected:
+        raise RuntimeError(
+            f"{checkpoint_dir} layer {layer} 的权重与当前模块不兼容；"
+            f"缺少={sorted(invalid_missing)}，额外={sorted(unexpected)}"
+        )
+
+
 def checkpoint_metadata(rank: int, z_dim: int, kappa: float, target_layers: tuple[int, ...], teacher_name: str, provider_name: str) -> dict[str, object]:
     """构造与光子模块权重匹配的结构元数据。"""
     return {
@@ -65,7 +90,7 @@ def load_compressed_modules(checkpoint_dir: str | Path, replacements: list[Photo
         raise ValueError(f"checkpoint 结构为 {saved_values}，当前结构为 {current_values}，两者不一致")
     weights = torch.load(Path(checkpoint_dir) / "photonic_modules.pt", map_location="cpu", weights_only=True)
     for index, module in zip(target_layers, replacements):
-        module.load_state_dict(weights[str(index)])
+        _load_module_state(module, weights[str(index)], checkpoint_dir, index)
 
 
 def load_stage_one_checkpoints(checkpoint_dirs: list[str | Path], replacements: list[PhotonicLowRankMLP], rank: int, z_dim: int, kappa: float, target_layers: tuple[int, ...], provider_name: str) -> None:
@@ -85,7 +110,7 @@ def load_stage_one_checkpoints(checkpoint_dirs: list[str | Path], replacements: 
         for index in saved_layers:
             if index in loaded_layers:
                 raise ValueError(f"layer {index} 在多个阶段一 checkpoint 中重复出现")
-            modules_by_layer[index].load_state_dict(weights[str(index)])
+            _load_module_state(modules_by_layer[index], weights[str(index)], checkpoint_dir, index)
             loaded_layers.add(index)
     expected_layers = set(target_layers)
     if loaded_layers != expected_layers:

@@ -21,6 +21,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--set", action="append", default=[], metavar="键路径=值", help="临时覆盖 YAML；可重复，例如 'model.target_layers=[22]'。")
     parser.add_argument("--freeze-photonic", action="store_true", help="固定光路 theta/phi，只训练 C（C-only 消融）")
     parser.add_argument("--pb-only", action="store_true", help="仅训练 P/B，固定 C 与 provider，并严格使用 g=1")
+    parser.add_argument("--freeze-pb-after", type=int, default=None, metavar="STEP", help="在完成 STEP 次 P/B 更新后冻结 P/B；C 与光路继续训练")
     parser.add_argument("--validate-initial", action="store_true", help="在 step 0 验证并保存初始 SVD/条件化 checkpoint")
     return parser.parse_args()
 
@@ -89,6 +90,8 @@ def main() -> None:
         rank, z_dim, kappa, target_layers,
         gate_scale=gate_scale,
         c_init_std=float(compression.get("c_init_std", 0.1)),
+        encoded_input_mode=str(compression.get("encoded_input_mode", "input_dependent")),
+        fixed_encoded_std=float(compression.get("fixed_encoded_std", 0.1)),
     )
     replacement = replacements[0]
     replacement.shots = photonic.get("shots")
@@ -98,6 +101,11 @@ def main() -> None:
     pb_parameters = list(replacement.pb_parameters())
     if args.pb_only and not bool(compression.get("train_pb", False)):
         raise ValueError("--pb-only 需要 compression.train_pb=true")
+    if args.freeze_pb_after is not None:
+        if args.freeze_pb_after < 1:
+            raise ValueError("--freeze-pb-after 必须为正整数")
+        if not bool(compression.get("train_pb", False)) or args.pb_only:
+            raise ValueError("--freeze-pb-after 需要 compression.train_pb=true 且不能与 --pb-only 同用")
     parameter_groups: list[dict[str, object]] = []
     if args.pb_only:
         for parameter in c_parameters + photonic_parameters:
@@ -212,6 +220,12 @@ def main() -> None:
             details["loss"].backward()
             gradient_norms = stage_one_gradient_norms(replacement)
             optimizer.step()
+            # Keep the first N P/B updates, then make the remainder of Stage 1
+            # a conditioning-only refinement without rebuilding Adam/scheduler.
+            if args.freeze_pb_after is not None and step == args.freeze_pb_after:
+                for parameter in pb_parameters:
+                    parameter.requires_grad_(False)
+                print(f"冻结 P/B：已完成前 {args.freeze_pb_after} 次更新", flush=True)
             if scheduler is not None:
                 scheduler.step()
             optimizer.zero_grad()
