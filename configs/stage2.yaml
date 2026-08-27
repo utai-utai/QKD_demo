@@ -17,6 +17,8 @@ compression:
   kappa: 1.0
   gate_scale: 1.0
   c_init_std: 0.1
+  encoded_input_mode: input_dependent
+  fixed_encoded_std: 0.1
   train_pb: false
 
 photonic:

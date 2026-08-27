@@ -302,7 +302,7 @@ class TrainingArtifacts:
         if isinstance(compression, dict):
             config["compression"] = {
                 key: compression[key]
-                for key in ("gate_scale", "c_init_std", "train_pb")
+                for key in ("gate_scale", "c_init_std", "encoded_input_mode", "fixed_encoded_std", "train_pb")
                 if key in compression
             }
 

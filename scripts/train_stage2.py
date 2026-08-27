@@ -21,6 +21,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="阶段二 YAML 配置文件")
     parser.add_argument("--set", action="append", default=[], metavar="键路径=值", help="临时覆盖 YAML；可重复使用。")
     parser.add_argument("--pb-only", action="store_true", help="仅训练 P/B，固定 C 与 provider，并严格使用 g=1")
+    parser.add_argument("--random-init", action="store_true", help="不加载 Stage 1 checkpoint，直接以 SVD P/B 与新建条件化参数开始 Stage 2")
     return parser.parse_args()
 
 
@@ -47,18 +48,24 @@ def stage_two_gradient_norms(replacements) -> dict[str, float]:
 def main() -> None:
     args = arguments()
 
-    # 1. 配置与 Stage 1 初始化权重
+    # 1. 配置与初始化方式
     config = apply_overrides(load_config(args.config), args.set)
     experiment, data = section(config, "experiment"), section(config, "data")
     model, compression = section(config, "model"), section(config, "compression")
     photonic, initialization = section(config, "photonic"), section(config, "initialization")
     optimization, validation_settings = section(config, "optimization"), section(config, "validation")
     target_layers = tuple(int(index) for index in model["target_layers"])
-    checkpoint_references = initialization.get("stage1_checkpoints")
-    if not isinstance(checkpoint_references, list) or not checkpoint_references:
-        raise ValueError("initialization.stage1_checkpoints 必须提供覆盖全部目标层的目录列表")
-    checkpoint_dirs = [resolve_checkpoint_dir(path) for path in checkpoint_references]
-    initialization["stage1_checkpoints"] = [str(path) for path in checkpoint_dirs]
+    if args.random_init:
+        checkpoint_dirs = []
+        initialization["mode"] = "random"
+        initialization["stage1_checkpoints"] = []
+    else:
+        checkpoint_references = initialization.get("stage1_checkpoints")
+        if not isinstance(checkpoint_references, list) or not checkpoint_references:
+            raise ValueError("initialization.stage1_checkpoints 必须提供覆盖全部目标层的目录列表；若要跳过 Stage 1，请传 --random-init")
+        checkpoint_dirs = [resolve_checkpoint_dir(path) for path in checkpoint_references]
+        initialization["mode"] = "stage1"
+        initialization["stage1_checkpoints"] = [str(path) for path in checkpoint_dirs]
     torch.manual_seed(int(experiment["seed"]))
     device = training_device()
     teacher_name = str(model["teacher"])
@@ -78,10 +85,13 @@ def main() -> None:
         teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers, float(photonic.get("theta_init_std", 0.1)), float(photonic.get("phi_init_std", 0.1)), int(photonic.get("meshes", 1))),
         rank, z_dim, kappa, target_layers, gate_scale=float(compression.get("gate_scale", 0.5)),
         c_init_std=float(compression.get("c_init_std", 0.1)),
+        encoded_input_mode=str(compression.get("encoded_input_mode", "input_dependent")),
+        fixed_encoded_std=float(compression.get("fixed_encoded_std", 0.1)),
     )
     for replacement in replacements:
         replacement.shots = photonic.get("shots")
-    load_stage_one_checkpoints(checkpoint_dirs, replacements, rank, z_dim, kappa, target_layers, str(photonic["provider"]))
+    if checkpoint_dirs:
+        load_stage_one_checkpoints(checkpoint_dirs, replacements, rank, z_dim, kappa, target_layers, str(photonic["provider"]))
     student.to(device).train()
     c_parameters = [parameter for replacement in replacements for parameter in replacement.c_parameters()]
     photonic_parameters = [parameter for replacement in replacements for parameter in replacement.photonic_parameters()]
