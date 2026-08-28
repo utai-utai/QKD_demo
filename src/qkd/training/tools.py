@@ -161,7 +161,8 @@ def stage_two_validation_objective(
     student: torch.nn.Module,
     teacher: torch.nn.Module,
     loader: DataLoader,
-    device: torch.device,
+    student_device: torch.device,
+    teacher_device: torch.device,
     temperature: float,
     top_k: int,
 ) -> dict[str, float]:
@@ -173,14 +174,15 @@ def stage_two_validation_objective(
         batches = 0
         progress = tqdm(loader, desc="Stage 2 validation", unit="batch", leave=False)
         for batch in progress:
-            batch = {key: value.to(device) for key, value in batch.items()}
+            teacher_batch = {key: value.to(teacher_device) for key, value in batch.items()}
+            student_batch = {key: value.to(student_device) for key, value in batch.items()}
             teacher_logits = teacher(
-                input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
-            ).logits
+                input_ids=teacher_batch["input_ids"], attention_mask=teacher_batch["attention_mask"]
+            ).logits.to(student_device)
             student_logits = student(
-                input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
+                input_ids=student_batch["input_ids"], attention_mask=student_batch["attention_mask"]
             ).logits
-            terms = stage_two_loss(student_logits, teacher_logits, batch["labels"], temperature, top_k)
+            terms = stage_two_loss(student_logits, teacher_logits, student_batch["labels"], temperature, top_k)
             for name in totals:
                 totals[name] += terms[name].float().item()
             batches += 1

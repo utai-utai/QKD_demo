@@ -251,9 +251,10 @@ class TrainingArtifacts:
         target_layers: tuple[int, ...],
         teacher_name: str,
         provider_name: str,
+        student_name: str | None = None,
     ) -> None:
         self.checkpoint = checkpoint_metadata(
-            rank, z_dim, kappa, target_layers, teacher_name, provider_name
+            rank, z_dim, kappa, target_layers, teacher_name, provider_name, student_name
         )
         save_compressed_modules(self.output, replacements, target_layers)
         self._write_metadata()
@@ -302,7 +303,7 @@ class TrainingArtifacts:
         if isinstance(compression, dict):
             config["compression"] = {
                 key: compression[key]
-                for key in ("gate_scale", "c_init_std", "encoded_input_mode", "fixed_encoded_std", "train_pb")
+                for key in ("gate_scale", "c_init_std", "encoded_input_mode", "fixed_encoded_std", "pb_initialization", "train_pb")
                 if key in compression
             }
 

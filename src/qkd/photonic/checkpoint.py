@@ -35,10 +35,14 @@ def _load_module_state(module: PhotonicLowRankMLP, state: dict[str, torch.Tensor
         )
 
 
-def checkpoint_metadata(rank: int, z_dim: int, kappa: float, target_layers: tuple[int, ...], teacher_name: str, provider_name: str) -> dict[str, object]:
+def checkpoint_metadata(
+    rank: int, z_dim: int, kappa: float, target_layers: tuple[int, ...], teacher_name: str,
+    provider_name: str, student_name: str | None = None,
+) -> dict[str, object]:
     """构造与光子模块权重匹配的结构元数据。"""
     return {
         "teacher": teacher_name,
+        "student": student_name or teacher_name,
         "provider": provider_name,
         "spec": {
             "rank": rank,

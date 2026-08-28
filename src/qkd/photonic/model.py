@@ -271,9 +271,10 @@ def make_compressed_student(
     encoded_input_mode: str = "input_dependent",
     fixed_encoded_std: float = 0.1,
     pb_initialization: str = "svd",
+    copy_model: bool = True,
 ) -> tuple[nn.Module, list[PhotonicLowRankMLP]]:
-    """复制冻结教师，并在副本中删除对应 MLP。"""
-    student = deepcopy(teacher)
+    """构造压缩学生；默认复制输入模型，双模型蒸馏可原地替换学生基座。"""
+    student = deepcopy(teacher) if copy_model else teacher
     return student, replace_final_mlps(
         student, provider_factory, rank, z_dim, kappa, target_layers, gate_scale, c_init_std,
         encoded_input_mode, fixed_encoded_std, pb_initialization,

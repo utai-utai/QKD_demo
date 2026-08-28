@@ -30,6 +30,17 @@ def parameter_norm(parameters) -> float:
     return torch.stack(values).sum().sqrt().item() if values else 0.0
 
 
+def model_vocab_size(model: torch.nn.Module) -> int:
+    """兼容纯文本与 Qwen 多模态封装模型的语言词表大小。"""
+    config = model.config
+    value = getattr(config, "vocab_size", None)
+    if value is None:
+        value = getattr(getattr(config, "text_config", None), "vocab_size", None)
+    if value is None:
+        raise ValueError("无法从模型配置读取 vocab_size")
+    return int(value)
+
+
 def stage_two_gradient_norms(replacements) -> dict[str, float]:
     c = [parameter for replacement in replacements for parameter in replacement.c_parameters()]
     pb = [parameter for replacement in replacements for parameter in replacement.pb_parameters()]
@@ -54,6 +65,13 @@ def main() -> None:
     model, compression = section(config, "model"), section(config, "compression")
     photonic, initialization = section(config, "photonic"), section(config, "initialization")
     optimization, validation_settings = section(config, "optimization"), section(config, "validation")
+    runtime = config.get("runtime", {})
+    artifact_settings = config.get("artifacts", {})
+    if not isinstance(runtime, dict):
+        raise ValueError("runtime 必须是映射")
+    if not isinstance(artifact_settings, dict):
+        raise ValueError("artifacts 必须是映射")
+    save_best_probe_enabled = bool(artifact_settings.get("save_best_probe", True))
     target_layers = tuple(int(index) for index in model["target_layers"])
     if args.random_init:
         checkpoint_dirs = []
@@ -67,33 +85,52 @@ def main() -> None:
         initialization["mode"] = "stage1"
         initialization["stage1_checkpoints"] = [str(path) for path in checkpoint_dirs]
     torch.manual_seed(int(experiment["seed"]))
-    device = training_device()
+    default_device = training_device()
+    teacher_device = torch.device(str(runtime.get("teacher_device", default_device)))
+    student_device = torch.device(str(runtime.get("student_device", default_device)))
     teacher_name = str(model["teacher"])
-    artifacts = TrainingArtifacts.create(config, "stage2", device, STAGE2_LOG_FIELDS)
+    student_name = str(model.get("student", teacher_name))
+    artifacts = TrainingArtifacts.create(config, "stage2", student_device, STAGE2_LOG_FIELDS)
 
     # 2. 数据、教师模型与多层学生模型
-    tokenizer = load_tokenizer(teacher_name)
+    tokenizer = load_tokenizer(student_name)
     train_loader = make_loader(str(data["train_data"]), tokenizer, int(data["batch_size"]), True)
     validation_loader = make_loader(str(data["validation_data"]), tokenizer, int(data["batch_size"]), False)
-    probe_batch = {key: value.to(device) for key, value in next(iter(validation_loader)).items()}
-    teacher = load_causal_lm(teacher_name, trainable=False).to(device).eval()
+    probe_batch = next(iter(validation_loader))
+    teacher_quantized = bool(runtime.get("teacher_preserve_quantization", False))
+    teacher = load_causal_lm(
+        teacher_name,
+        trainable=False,
+        model_class=str(runtime.get("teacher_model_class", "causal")),
+        preserve_quantization=teacher_quantized,
+        device=teacher_device if teacher_quantized else None,
+    )
+    if not teacher_quantized:
+        teacher.to(teacher_device)
+    teacher.eval()
+    student_base = load_causal_lm(student_name, trainable=False)
+    teacher_vocab = model_vocab_size(teacher)
+    student_vocab = model_vocab_size(student_base)
+    if teacher_vocab != student_vocab:
+        raise ValueError(f"教师与学生 vocab_size 不一致：{teacher_vocab} != {student_vocab}")
     rank = int(compression["rank"])
     z_dim = int(compression["z_dim"])
     kappa = float(compression["kappa"])
     n_modes, n_layers = int(photonic["modes"]), int(photonic["layers"])
     student, replacements = make_compressed_student(
-        teacher, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers, float(photonic.get("theta_init_std", 0.1)), float(photonic.get("phi_init_std", 0.1)), int(photonic.get("meshes", 1))),
+        student_base, provider_factory(str(photonic["provider"]), z_dim, photonic.get("ema_decay"), n_modes, n_layers, float(photonic.get("theta_init_std", 0.1)), float(photonic.get("phi_init_std", 0.1)), int(photonic.get("meshes", 1))),
         rank, z_dim, kappa, target_layers, gate_scale=float(compression.get("gate_scale", 0.5)),
         c_init_std=float(compression.get("c_init_std", 0.1)),
         encoded_input_mode=str(compression.get("encoded_input_mode", "input_dependent")),
         fixed_encoded_std=float(compression.get("fixed_encoded_std", 0.1)),
         pb_initialization=str(compression.get("pb_initialization", "svd")),
+        copy_model=False,
     )
     for replacement in replacements:
         replacement.shots = photonic.get("shots")
     if checkpoint_dirs:
         load_stage_one_checkpoints(checkpoint_dirs, replacements, rank, z_dim, kappa, target_layers, str(photonic["provider"]))
-    student.to(device).train()
+    student.to(student_device).train()
     c_parameters = [parameter for replacement in replacements for parameter in replacement.c_parameters()]
     photonic_parameters = [parameter for replacement in replacements for parameter in replacement.photonic_parameters()]
     pb_parameters = [parameter for replacement in replacements for parameter in replacement.pb_parameters()]
@@ -151,9 +188,11 @@ def main() -> None:
     def save_best_probe(step: int, loss: float) -> None:
         student.eval()
         try:
+            teacher_batch = {key: value.to(teacher_device) for key, value in probe_batch.items()}
+            student_batch = {key: value.to(student_device) for key, value in probe_batch.items()}
             with capture_mlp_outputs(teacher, student, target_layers) as (teacher_y, student_y):
-                teacher(input_ids=probe_batch["input_ids"], attention_mask=probe_batch["attention_mask"])
-                student(input_ids=probe_batch["input_ids"], attention_mask=probe_batch["attention_mask"])
+                teacher(input_ids=teacher_batch["input_ids"], attention_mask=teacher_batch["attention_mask"])
+                student(input_ids=student_batch["input_ids"], attention_mask=student_batch["attention_mask"])
             artifacts.save_best_probe(best_probe_payload("stage2", step, "validation_loss", loss, target_layers, probe_batch, teacher_y, student_y))
         finally:
             student.train()
@@ -163,11 +202,12 @@ def main() -> None:
     progress = tqdm(range(1, int(optimization["steps"]) + 1), desc=f"Stage 2 · layers {layer_label}", unit="step")
     for step in progress:
         batch, iterator = next_batch(iterator, train_loader)
-        batch = {key: value.to(device) for key, value in batch.items()}
+        teacher_batch = {key: value.to(teacher_device) for key, value in batch.items()}
+        student_batch = {key: value.to(student_device) for key, value in batch.items()}
         with torch.no_grad():
-            teacher_logits = teacher(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits  # 跑不带梯度的 Teacher 获得教师 logits
-        student_logits = student(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits  # 跑全网 Student 获得学生 logits
-        terms = stage_two_loss(student_logits, teacher_logits, batch["labels"], temperature=float(optimization["temperature"]), top_k=int(optimization["top_k"]))
+            teacher_logits = teacher(input_ids=teacher_batch["input_ids"], attention_mask=teacher_batch["attention_mask"]).logits.to(student_device)
+        student_logits = student(input_ids=student_batch["input_ids"], attention_mask=student_batch["attention_mask"]).logits
+        terms = stage_two_loss(student_logits, teacher_logits, student_batch["labels"], temperature=float(optimization["temperature"]), top_k=int(optimization["top_k"]))
         terms["loss"].backward()
         gradient_norms = stage_two_gradient_norms(replacements)
         optimizer.step()
@@ -192,7 +232,7 @@ def main() -> None:
 
         if step % validation_every == 0:
             validation = stage_two_validation_objective(
-                student, teacher, validation_loader, device,
+                student, teacher, validation_loader, student_device, teacher_device,
                 float(optimization["temperature"]), int(optimization["top_k"]),
             )
             row["validation_loss"] = validation["loss"]
@@ -202,8 +242,9 @@ def main() -> None:
                 best_loss = validation["loss"]
                 best_step = step
                 row["is_best"] = True
-                artifacts.save_checkpoint(replacements, rank, z_dim, kappa, target_layers, teacher_name, str(photonic["provider"]))
-                save_best_probe(step, validation["loss"])
+                artifacts.save_checkpoint(replacements, rank, z_dim, kappa, target_layers, teacher_name, str(photonic["provider"]), student_name)
+                if save_best_probe_enabled:
+                    save_best_probe(step, validation["loss"])
 
         if early_stop_loss is not None and final_loss <= float(early_stop_loss):
             stopped_early = True
