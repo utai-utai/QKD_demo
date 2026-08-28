@@ -41,6 +41,19 @@ def _svd_pb(linear: nn.Module | Tensor, rank: int) -> tuple[Tensor, Tensor]:
     return p.to(linear.weight), b.to(linear.weight)
 
 
+def _random_pb(linear: nn.Module | Tensor, rank: int, seed: int) -> tuple[Tensor, Tensor]:
+    """快速构造低秩 P/B，仅供 smoke test 跳过昂贵的精确 SVD。
+
+    这不是教师权重的近似，不能用于任何正式训练或结果比较；checkpoint
+    中会记录 ``pb_initialization=random``，从而评测重建时也不会意外做 SVD。
+    """
+    weight = linear.weight
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    p = torch.randn(weight.shape[0], rank, generator=generator) * 0.02
+    b = torch.randn(rank, weight.shape[1], generator=generator) * 0.02
+    return p.to(weight), b.to(weight)
+
+
 class ConditionedLowRankLinear(nn.Module):
     """以教师线性层的截断 SVD 初始化 ``P (g(z) ⊙ (B s))``。"""
     def __init__(
@@ -54,11 +67,17 @@ class ConditionedLowRankLinear(nn.Module):
         c_init_std: float = 0.1,
         encoded_input_mode: str = "input_dependent",
         fixed_encoded_std: float = 0.1,
+        pb_initialization: str = "svd",
     ) -> None:
         super().__init__()
         if rank < z_dim:
             raise ValueError("当前光子设计要求 rank 不小于 z_dim")
-        p, b = _svd_pb(teacher_target, rank)
+        if pb_initialization == "svd":
+            p, b = _svd_pb(teacher_target, rank)
+        elif pb_initialization == "random":
+            p, b = _random_pb(teacher_target, rank, seed)
+        else:
+            raise ValueError("pb_initialization 必须是 svd 或 random")
         # 截断 SVD 提供固定低秩基；训练仅学习无偏置的条件化门控 C。
         self.P = nn.Parameter(p, requires_grad=False)
         self.B = nn.Parameter(b, requires_grad=False)
@@ -114,15 +133,16 @@ class PhotonicLowRankMLP(nn.Module):
         c_init_std: float = 0.1,
         encoded_input_mode: str = "input_dependent",
         fixed_encoded_std: float = 0.1,
+        pb_initialization: str = "svd",
     ) -> None:
         super().__init__()
         for name in ("gate_proj", "up_proj", "down_proj"):
             if not isinstance(getattr(old_mlp, name, None), nn.Linear):
                 raise TypeError(f"MLP lacks a linear {name}")
         # 三个 W 完全独立：不共享线路实例、光路参数或 EMA。
-        self.gate = ConditionedLowRankLinear(old_mlp.gate_proj, rank, z_dim, kappa, layer_index * 11 + 1, gate_scale, c_init_std, encoded_input_mode, fixed_encoded_std)
-        self.up = ConditionedLowRankLinear(old_mlp.up_proj, rank, z_dim, kappa, layer_index * 11 + 2, gate_scale, c_init_std, encoded_input_mode, fixed_encoded_std)
-        self.down = ConditionedLowRankLinear(old_mlp.down_proj, 2 * rank, z_dim, kappa, layer_index * 11 + 3, gate_scale, c_init_std, encoded_input_mode, fixed_encoded_std)
+        self.gate = ConditionedLowRankLinear(old_mlp.gate_proj, rank, z_dim, kappa, layer_index * 11 + 1, gate_scale, c_init_std, encoded_input_mode, fixed_encoded_std, pb_initialization)
+        self.up = ConditionedLowRankLinear(old_mlp.up_proj, rank, z_dim, kappa, layer_index * 11 + 2, gate_scale, c_init_std, encoded_input_mode, fixed_encoded_std, pb_initialization)
+        self.down = ConditionedLowRankLinear(old_mlp.down_proj, 2 * rank, z_dim, kappa, layer_index * 11 + 3, gate_scale, c_init_std, encoded_input_mode, fixed_encoded_std, pb_initialization)
         self.gate_provider = provider_factory()
         self.up_provider = provider_factory()
         self.down_provider = provider_factory()
@@ -216,6 +236,7 @@ def replace_final_mlps(
     c_init_std: float = 0.1,
     encoded_input_mode: str = "input_dependent",
     fixed_encoded_std: float = 0.1,
+    pb_initialization: str = "svd",
 ) -> list[PhotonicLowRankMLP]:
     """完整删除并替换 ``target_layers`` 指定的 MLP。"""
     layers = find_decoder_layers(model)
@@ -231,7 +252,7 @@ def replace_final_mlps(
         # 每层维护独立的线路实例与 EMA；避免层间的特征统计相互污染。
         replacement = PhotonicLowRankMLP(
             layers[index].mlp, provider_factory, rank, z_dim, kappa, index, gate_scale, c_init_std,
-            encoded_input_mode, fixed_encoded_std,
+            encoded_input_mode, fixed_encoded_std, pb_initialization,
         )
         layers[index].mlp = replacement
         replacements.append(replacement)
@@ -249,12 +270,13 @@ def make_compressed_student(
     c_init_std: float = 0.1,
     encoded_input_mode: str = "input_dependent",
     fixed_encoded_std: float = 0.1,
+    pb_initialization: str = "svd",
 ) -> tuple[nn.Module, list[PhotonicLowRankMLP]]:
     """复制冻结教师，并在副本中删除对应 MLP。"""
     student = deepcopy(teacher)
     return student, replace_final_mlps(
         student, provider_factory, rank, z_dim, kappa, target_layers, gate_scale, c_init_std,
-        encoded_input_mode, fixed_encoded_std,
+        encoded_input_mode, fixed_encoded_std, pb_initialization,
     )
 
 

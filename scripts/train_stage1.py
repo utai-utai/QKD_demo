@@ -92,6 +92,7 @@ def main() -> None:
         c_init_std=float(compression.get("c_init_std", 0.1)),
         encoded_input_mode=str(compression.get("encoded_input_mode", "input_dependent")),
         fixed_encoded_std=float(compression.get("fixed_encoded_std", 0.1)),
+        pb_initialization=str(compression.get("pb_initialization", "svd")),
     )
     replacement = replacements[0]
     replacement.shots = photonic.get("shots")

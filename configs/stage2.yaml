@@ -19,6 +19,7 @@ compression:
   c_init_std: 0.1
   encoded_input_mode: input_dependent
   fixed_encoded_std: 0.1
+  pb_initialization: svd  # svd=正式初始化；random 仅用于跳过 SVD 的 smoke test
   train_pb: false
 
 photonic:
