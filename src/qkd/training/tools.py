@@ -165,8 +165,11 @@ def stage_two_validation_objective(
     teacher_device: torch.device,
     temperature: float,
     top_k: int,
+    max_batches: int | None = None,
 ) -> dict[str, float]:
-    """计算完整验证集的 Stage 2 蒸馏指标。"""
+    """计算完整验证集或固定前缀的 Stage 2 蒸馏指标。"""
+    if max_batches is not None and max_batches < 1:
+        raise ValueError("max_batches 必须为正整数或 None")
     was_training = student.training
     student.eval()
     try:
@@ -174,6 +177,8 @@ def stage_two_validation_objective(
         batches = 0
         progress = tqdm(loader, desc="Stage 2 validation", unit="batch", leave=False)
         for batch in progress:
+            if max_batches is not None and batches >= max_batches:
+                break
             teacher_batch = {key: value.to(teacher_device) for key, value in batch.items()}
             student_batch = {key: value.to(student_device) for key, value in batch.items()}
             teacher_logits = teacher(

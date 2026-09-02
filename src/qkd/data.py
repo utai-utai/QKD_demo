@@ -33,6 +33,32 @@ def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
     return records
 
 
+def read_tokenized_jsonl(path: str | Path) -> list[dict[str, Any]]:
+    """读取并校验预 token 化 JSONL 记录。
+
+    ``prepare_dolmino.py`` 直接写入 ``input_ids``、``attention_mask`` 和
+    ``labels``，不包含对话格式的 ``messages``。将这一路径与 ``read_jsonl``
+    分开，避免放宽原始对话数据的格式校验。
+    """
+    required = ("input_ids", "attention_mask", "labels")
+    records: list[dict[str, Any]] = []
+    for line_number, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        if not isinstance(record, dict) or any(not isinstance(record.get(key), list) for key in required):
+            raise ValueError(f"{path}:{line_number}: expected tokenized input_ids, attention_mask, and labels lists")
+        lengths = {len(record[key]) for key in required}
+        if len(lengths) != 1 or not lengths.pop():
+            raise ValueError(f"{path}:{line_number}: tokenized fields must be non-empty and have equal lengths")
+        if any(any(not isinstance(token, int) for token in record[key]) for key in required):
+            raise ValueError(f"{path}:{line_number}: tokenized fields must contain integers only")
+        records.append(record)
+    if not records:
+        raise ValueError(f"{path}: no tokenized JSONL records found")
+    return records
+
+
 def write_jsonl(path: str | Path, records: Iterable[dict[str, Any]]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,10 +138,7 @@ def tokenize_messages(tokenizer: Any, messages: list[dict[str, str]], max_length
 class TokenizedChatDataset(Dataset[dict[str, torch.Tensor]]):
     """由 ``prepare_data.py`` 生成的 token 化 JSONL 支撑的数据集。"""
     def __init__(self, path: str | Path) -> None:
-        self.records = read_jsonl(path)
-        required = {"input_ids", "attention_mask", "labels"}
-        if any(not required.issubset(record) for record in self.records):
-            raise ValueError(f"{path} is not tokenized; run scripts/prepare_data.py first")
+        self.records = read_tokenized_jsonl(path)
 
     def __len__(self) -> int:
         return len(self.records)

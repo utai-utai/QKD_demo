@@ -178,6 +178,10 @@ def main() -> None:
     validation_every = int(validation_settings["every"])
     if validation_every < 1:
         raise ValueError("validation.every 必须为正整数")
+    validation_max_batches_raw = validation_settings.get("max_batches")
+    validation_max_batches = None if validation_max_batches_raw is None else int(validation_max_batches_raw)
+    if validation_max_batches is not None and validation_max_batches < 1:
+        raise ValueError("validation.max_batches 必须为正整数或 null")
     best_loss = float("inf")
     best_step: int | None = None
     final_loss: float | None = None
@@ -191,8 +195,8 @@ def main() -> None:
             teacher_batch = {key: value.to(teacher_device) for key, value in probe_batch.items()}
             student_batch = {key: value.to(student_device) for key, value in probe_batch.items()}
             with capture_mlp_outputs(teacher, student, target_layers) as (teacher_y, student_y):
-                teacher(input_ids=teacher_batch["input_ids"], attention_mask=teacher_batch["attention_mask"])
-                student(input_ids=student_batch["input_ids"], attention_mask=student_batch["attention_mask"])
+                teacher(input_ids=teacher_batch["input_ids"], attention_mask=teacher_batch["attention_mask"], use_cache=False)
+                student(input_ids=student_batch["input_ids"], attention_mask=student_batch["attention_mask"], use_cache=False)
             artifacts.save_best_probe(best_probe_payload("stage2", step, "validation_loss", loss, target_layers, probe_batch, teacher_y, student_y))
         finally:
             student.train()
@@ -205,8 +209,8 @@ def main() -> None:
         teacher_batch = {key: value.to(teacher_device) for key, value in batch.items()}
         student_batch = {key: value.to(student_device) for key, value in batch.items()}
         with torch.no_grad():
-            teacher_logits = teacher(input_ids=teacher_batch["input_ids"], attention_mask=teacher_batch["attention_mask"]).logits.to(student_device)
-        student_logits = student(input_ids=student_batch["input_ids"], attention_mask=student_batch["attention_mask"]).logits
+            teacher_logits = teacher(input_ids=teacher_batch["input_ids"], attention_mask=teacher_batch["attention_mask"], use_cache=False).logits.to(student_device)
+        student_logits = student(input_ids=student_batch["input_ids"], attention_mask=student_batch["attention_mask"], use_cache=False).logits
         terms = stage_two_loss(student_logits, teacher_logits, student_batch["labels"], temperature=float(optimization["temperature"]), top_k=int(optimization["top_k"]))
         terms["loss"].backward()
         gradient_norms = stage_two_gradient_norms(replacements)
@@ -233,7 +237,7 @@ def main() -> None:
         if step % validation_every == 0:
             validation = stage_two_validation_objective(
                 student, teacher, validation_loader, student_device, teacher_device,
-                float(optimization["temperature"]), int(optimization["top_k"]),
+                float(optimization["temperature"]), int(optimization["top_k"]), validation_max_batches,
             )
             row["validation_loss"] = validation["loss"]
             row["validation_ce"] = validation["ce"]

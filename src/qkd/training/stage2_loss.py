@@ -41,8 +41,12 @@ def expanded_topk_logit_kl(
     """在扩展教师 Top-K logits 上计算右移且掩码化的 KD。"""
     teacher_positions = teacher_logits[:, :-1]
     indices = expanded_topk_indices(teacher_logits, labels, top_k)
-    student = student_logits[:, :-1].float().gather(-1, indices) / temperature
-    teacher = teacher_positions.float().gather(-1, indices) / temperature
+    # 先收集 Top-K + 真实 token，再转 FP32。对全词表 logits 先 ``.float()``
+    # 会为 [batch, sequence, vocab] 额外复制数 GB 显存；27B 教师与全 32 层
+    # 学生同卡时容易 OOM。gather 对 FP16/BF16 logits 等价，之后的 FP32 用于
+    # softmax / KL 的数值稳定性。
+    student = student_logits[:, :-1].gather(-1, indices).float() / temperature
+    teacher = teacher_positions.gather(-1, indices).float() / temperature
     valid = labels[:, 1:].ne(-100)
     # 真实 token 已在 Top-K 中时，末尾的重复候选必须被屏蔽，不能改变原 Top-K 分布。
     true_token = labels[:, 1:].clamp_min(0).unsqueeze(-1)
