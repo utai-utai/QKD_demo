@@ -4,8 +4,8 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .env
-data/raw/
-data/processed/
+data/
+models/
 outputs/
 wandb/
 checkpoints/

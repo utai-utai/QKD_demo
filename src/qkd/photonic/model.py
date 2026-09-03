@@ -111,9 +111,15 @@ class ConditionedLowRankLinear(nn.Module):
             return F.linear(t, self.P)
         if self.encoded_input_mode == "input_dependent":
             encoded = self.kappa * torch.tanh(F.linear(t, self.R))
+            z = provider.sample(encoded, shots, x.device)
         else:
-            encoded = self.fixed_encoded.expand(*t.shape[:-1], self.fixed_encoded.shape[0])
-        z = provider.sample(encoded, shots, x.device)
+            # 固定 z 对所有 batch/token 完全相同；只需执行一次光路，再广播。
+            # 原先将同一向量 expand 到每个 token 后逐 token 跑线路，结果相同但
+            # 在全层替换与长文本评测中会产生大量冗余的 Clements 演化。
+            fixed = self.fixed_encoded.unsqueeze(0)
+            z = provider.sample(fixed, shots, x.device)
+            z_dim = self.fixed_encoded.shape[-1]
+            z = z.view(*([1] * (t.ndim - 1)), z_dim).expand(*t.shape[:-1], z_dim)
         z = z.to(device=t.device, dtype=self.C.dtype)
         gate = 1 + self.gate_scale * torch.tanh(F.linear(z, self.C))
         return F.linear(gate * t, self.P)
