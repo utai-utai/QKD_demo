@@ -30,6 +30,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--target-layers", nargs="+", type=int, default=[28, 29, 30, 31])
     parser.add_argument("--gate-scale", type=float, default=1.0)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--max-length", type=int, default=1024, help="lm-eval 单次前向的最大 token 数；限制 rolling likelihood 的 logits 峰值显存")
     parser.add_argument("--num-fewshot", type=int, default=0)
     parser.add_argument("--limit", type=int, help="每个任务最多评估的样本数；仅用于冒烟，不可报告为正式分数")
     parser.add_argument("--hf-home", type=Path, default=Path("data/benchmark_cache"), help="离线 Hugging Face cache 根目录")
@@ -102,7 +103,8 @@ def main() -> None:
     if text_config is not None and hasattr(text_config, "use_cache"):
         text_config.use_cache = True
     tokenizer = load_tokenizer(str(details.get("student", args.teacher)))
-    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.batch_size)
+    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.batch_size, max_length=args.max_length)
+    print(f"[lm-eval] 请求 batch_size={args.batch_size}；HFLM 实际 batch_size={lm.batch_size}；max_length={lm.max_length}")
     results = simple_evaluate(
         model=lm, tasks=args.tasks, num_fewshot=args.num_fewshot,
         batch_size=args.batch_size, limit=args.limit,
@@ -113,6 +115,7 @@ def main() -> None:
         "tasks": args.tasks,
         "num_fewshot": args.num_fewshot,
         "batch_size": args.batch_size,
+        "max_length": args.max_length,
         "limit": args.limit,
         "hf_home": str(hf_home),
         "offline": not args.online,
